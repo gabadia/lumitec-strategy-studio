@@ -65,9 +65,10 @@ All 16 patterns must be present. If the error references one of these, add the m
 | 14 | `validate_legs()` classmethod | Add enforcing leg count and side |
 | 15 | `isPaused()` guard | Add `if self.isPaused(): return` at top of every market data handler |
 | 16 | `on_pause()` / `on_resume()` | Add both hooks |
-| 17 | `self.observe()` in market data handlers | Add logging signal values — e.g. `self.observe("bar", context={"price": float(bar.close)})` |
-| 18 | `self.decide()` before entry/exit | Add before every order decision — e.g. `self.decide("entry signal", context={"reason": "..."})` |
-| 19 | `self.act()` after order actions | Add after every submit/cancel/stop — e.g. `self.act("submitted BUY", context={"qty": qty})` |
+| 17 | `_param_lock` in `__init__` | Add `self._param_lock = RLock()` in `__init__` — NOT in `on_start` |
+| 18 | `self.observe()` in market data handlers | Add logging signal values — e.g. `self.observe("bar", context={"price": float(bar.close)})` |
+| 19 | `self.decide()` before entry/exit | Add before every order decision — e.g. `self.decide("entry signal", context={"reason": "..."})` |
+| 20 | `self.act()` after order actions | Add after every submit/cancel/stop — e.g. `self.act("submitted BUY", context={"qty": qty})` |
 
 ---
 

@@ -16,6 +16,12 @@ function formatDuration(ms: number) {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
+const EXECUTION_PLANE_TOOLS = new Set(['submit_strategy', 'start_strategy', 'stop_strategy', 'update_strategy', 'get_strategy_status'])
+
+function toolLabel(name: string | undefined) {
+  return name && EXECUTION_PLANE_TOOLS.has(name) ? 'REST' : 'MCP'
+}
+
 function EntryRow({ entry }: { entry: ActivityEntry }) {
   const { type } = entry
 
@@ -74,7 +80,7 @@ function EntryRow({ entry }: { entry: ActivityEntry }) {
     return (
       <div style={{ padding: '5px 12px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 6 }}>
         <span style={{ color: 'var(--text-muted)', fontSize: 10 }}>{formatTime(entry.timestamp)}</span>
-        <span className="tag tag-tool">→ MCP</span>
+        <span className="tag tag-tool">→ {toolLabel(entry.toolName)}</span>
         <span style={{ color: 'var(--accent)', fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>
           {entry.toolName}
         </span>
@@ -90,7 +96,7 @@ function EntryRow({ entry }: { entry: ActivityEntry }) {
       <div style={{ padding: '5px 12px', borderBottom: '1px solid var(--border)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span style={{ color: 'var(--text-muted)', fontSize: 10 }}>{formatTime(entry.timestamp)}</span>
-          <span className="tag tag-tool">→ MCP</span>
+          <span className="tag tag-tool">→ {toolLabel(entry.toolName)}</span>
           <span style={{ color: 'var(--accent)', fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>
             {entry.toolName}
           </span>
@@ -108,7 +114,7 @@ function EntryRow({ entry }: { entry: ActivityEntry }) {
     return (
       <div style={{ padding: '4px 12px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 6 }}>
         <span style={{ color: 'var(--text-muted)', fontSize: 10 }}>{formatTime(entry.timestamp)}</span>
-        <span className="tag tag-tool">⟳ MCP</span>
+        <span className="tag tag-tool">⟳ {toolLabel(entry.toolName)}</span>
         <span style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
           {entry.toolName} running…
         </span>
@@ -122,7 +128,7 @@ function EntryRow({ entry }: { entry: ActivityEntry }) {
       <div style={{ padding: '5px 12px', borderBottom: '1px solid var(--border)', background: failed ? '#1a0a0a' : 'transparent' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span style={{ color: 'var(--text-muted)', fontSize: 10 }}>{formatTime(entry.timestamp)}</span>
-          <span className="tag tag-result" style={failed ? { background: '#3a1a1a', color: 'var(--red)' } : {}}>← MCP</span>
+          <span className="tag tag-result" style={failed ? { background: '#3a1a1a', color: 'var(--red)' } : {}}>← {toolLabel(entry.toolName)}</span>
           <span style={{ color: failed ? 'var(--red)' : 'var(--green)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
             {entry.toolName}
           </span>
@@ -147,7 +153,7 @@ function EntryRow({ entry }: { entry: ActivityEntry }) {
       <div style={{ padding: '5px 12px', borderBottom: '1px solid var(--border)', background: '#1a0a0a' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span style={{ color: 'var(--text-muted)', fontSize: 10 }}>{formatTime(entry.timestamp)}</span>
-          <span className="tag tag-error">✗ MCP</span>
+          <span className="tag tag-error">✗ {toolLabel(entry.toolName)}</span>
           <span style={{ color: 'var(--red)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>{entry.toolName}</span>
           {entry.durationMs !== undefined && (
             <span style={{ color: 'var(--text-muted)', fontSize: 10, fontFamily: 'var(--font-mono)' }}>

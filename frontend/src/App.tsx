@@ -2,11 +2,12 @@ import { useCallback, useRef, useState } from 'react'
 import { create } from 'zustand'
 import IntentInput from './components/IntentInput'
 import ActivityFeed from './components/ActivityFeed'
+import StrategyEventsFeed from './components/StrategyEventsFeed'
 import CodePanel from './components/CodePanel'
 import RunQA from './components/RunQA'
 import StatusStepper from './components/StatusStepper'
 import LoginGate from './components/LoginGate'
-import type { ActivityEntry, StudioEvent, WorkflowStep } from './types'
+import type { ActivityEntry, StrategyRawEvent, StudioEvent, WorkflowStep } from './types'
 import { toolToStep } from './types'
 import { clearTrader, getTrader, getTraderHeaders } from './auth'
 
@@ -30,23 +31,32 @@ interface StudioState {
   isRunning: boolean
   step: WorkflowStep
   activity: ActivityEntry[]
+  strategyEvents: StrategyRawEvent[]  // raw supervisor events from SSE gateway
   code: string
   savedCode: string          // last persisted version — used to detect unsaved changes
   loadedStrategyName: string | null   // tracks which file code was loaded from
   toolsAvailable: string[]
   activeStrategyId: string | null     // set after submit_strategy succeeds
   modelSettings: ModelSettings
+  pendingSubmission: {
+    legs: Array<{ leg_id: string; symbol: string; quantity: number; side: string; tif: string }>
+    params: Array<{ name: string; type: 'int' | 'float' | 'bool' | 'str'; value: string | number | boolean }>
+    isFirstSubmit: boolean
+  } | null
 
   setRunning: (v: boolean) => void
   setStep: (s: WorkflowStep) => void
   addActivity: (e: ActivityEntry) => void
   updateLastActivity: (id: string, patch: Partial<ActivityEntry>) => void
+  addStrategyEvent: (e: StrategyRawEvent) => void
+  clearStrategyEvents: () => void
   setCode: (c: string) => void
   setSavedCode: (c: string) => void
   setLoadedStrategyName: (name: string | null) => void
   setTools: (t: string[]) => void
   setActiveStrategyId: (id: string | null) => void
   setModelSettings: (s: ModelSettings) => void
+  setPendingSubmission: (v: StudioState['pendingSubmission']) => void
   reset: () => void
 }
 
@@ -54,12 +64,14 @@ export const useStore = create<StudioState>((set) => ({
   isRunning: false,
   step: 'idle',
   activity: [],
+  strategyEvents: [],
   code: '',
   savedCode: '',
   loadedStrategyName: null,
   toolsAvailable: [],
   activeStrategyId: null,
   modelSettings: DEFAULT_MODEL_SETTINGS,
+  pendingSubmission: null,
 
   setRunning: (v) => set({ isRunning: v }),
   setStep: (s) => set({ step: s }),
@@ -68,13 +80,16 @@ export const useStore = create<StudioState>((set) => ({
     set((s) => ({
       activity: s.activity.map((e) => (e.id === id ? { ...e, ...patch } : e)),
     })),
+  addStrategyEvent: (e) => set((s) => ({ strategyEvents: [...s.strategyEvents, e] })),
+  clearStrategyEvents: () => set({ strategyEvents: [] }),
   setCode: (c) => set({ code: c }),
   setSavedCode: (c) => set({ savedCode: c }),
   setLoadedStrategyName: (name) => set({ loadedStrategyName: name }),
   setTools: (t) => set({ toolsAvailable: t }),
   setActiveStrategyId: (id) => set({ activeStrategyId: id }),
   setModelSettings: (s) => set({ modelSettings: s }),
-  reset: () => set({ isRunning: false, step: 'idle', activity: [], code: '', savedCode: '', loadedStrategyName: null, activeStrategyId: null }),
+  setPendingSubmission: (v) => set({ pendingSubmission: v }),
+  reset: () => set({ isRunning: false, step: 'idle', activity: [], strategyEvents: [], code: '', savedCode: '', loadedStrategyName: null, activeStrategyId: null, pendingSubmission: null }),
 }))
 
 // ---------------------------------------------------------------------------
@@ -179,17 +194,67 @@ async function streamWorkflow(
 // App
 // ---------------------------------------------------------------------------
 
+let strategyEventId = 0
+const nextStrategyEventId = () => String(++strategyEventId)
+
 export default function App() {
   const {
     isRunning, step, code, modelSettings,
-    setRunning, setStep, addActivity, updateLastActivity,
-    setCode, setSavedCode, setLoadedStrategyName, setTools, setActiveStrategyId, setModelSettings, reset,
+    setRunning, setStep, addActivity, updateLastActivity, addStrategyEvent, clearStrategyEvents,
+    setCode, setSavedCode, setLoadedStrategyName, setTools, setActiveStrategyId, setModelSettings, setPendingSubmission, reset,
   } = useStore()
   const abortRef = useRef<AbortController | null>(null)
+  const eventSourceRef = useRef<EventSource | null>(null)
   const [rightPanel, setRightPanel] = useState<'code' | 'qa'>('code')
+  const [leftPanel, setLeftPanel] = useState<'activity' | 'events'>('activity')
 
   const liveTextIdRef = useRef<string | null>(null)
   const liveTextTurnRef = useRef<number | null>(null)
+
+  const openStrategyEventSource = useCallback((strategyId: string) => {
+    // Close any existing connection
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close()
+      eventSourceRef.current = null
+    }
+    clearStrategyEvents()
+
+    const es = new EventSource(`/api/strategies/${strategyId}/events`)
+    eventSourceRef.current = es
+
+    es.onmessage = (ev) => {
+      try {
+        const raw = JSON.parse(ev.data) as Record<string, unknown>
+        const eventType = (raw.event_type ?? raw.type ?? 'unknown') as string
+        if (eventType === 'stream_end' || eventType === 'relay_error') {
+          es.close()
+          eventSourceRef.current = null
+          return
+        }
+        const terminationType = raw.termination_type as string | undefined
+        addStrategyEvent({
+          id: nextStrategyEventId(),
+          timestamp: Date.now(),
+          eventType,
+          strategyId: raw.strategy_id as string | undefined,
+          raw,
+          terminationType,
+        })
+        if (terminationType) {
+          // Terminal event received — strategy has stopped
+          setStep('done')
+          setRunning(false)
+          es.close()
+          eventSourceRef.current = null
+        }
+      } catch { /* ignore malformed */ }
+    }
+
+    es.onerror = () => {
+      es.close()
+      eventSourceRef.current = null
+    }
+  }, [addStrategyEvent, clearStrategyEvents, setStep, setRunning])
 
   // Load a strategy into the editor without running
   const handleLoad = useCallback(async (strategyName: string) => {
@@ -271,6 +336,12 @@ export default function App() {
             codeBuffer = code
             setCode(codeBuffer)
           }
+          // Open SSE event stream as soon as we know the strategy_id — before the HTTP submit fires
+          if (event.name === 'submit_strategy' && inp.strategy_id) {
+            setStep('monitoring')
+            setLeftPanel('events')
+            openStrategyEventSource(inp.strategy_id as string)
+          }
           addActivity({ id: nextId(), type: 'tool_call', timestamp: ts, toolName: event.name, toolInput: event.input, turn: event.turn })
           break
         }
@@ -289,6 +360,7 @@ export default function App() {
 
         case 'strategy_submitted':
           setActiveStrategyId(event.strategy_id)
+          // EventSource already opened on tool_call — don't reopen
           break
 
         case 'sim_commentary':
@@ -308,6 +380,13 @@ export default function App() {
           addActivity({ id: nextId(), type: 'rate_limit_retry', timestamp: ts, content: event.message })
           break
 
+        case 'params_ready':
+          // Strategy generated + validated — store the code and hand legs/params to the UI
+          setCode(event.code)
+          setSavedCode(event.code)
+          setPendingSubmission({ legs: event.legs, params: event.params, isFirstSubmit: true })
+          break
+
         case 'turn_complete':
           if (liveTextIdRef.current) {
             updateLastActivity(liveTextIdRef.current, { live: false })
@@ -315,17 +394,24 @@ export default function App() {
           }
           break
 
-        case 'done':
+        case 'done': {
           if (liveTextIdRef.current) {
             updateLastActivity(liveTextIdRef.current, { live: false })
             liveTextIdRef.current = null
           }
-          setStep('done')
-          setRunning(false)
+          // If a strategy was submitted, stay in monitoring state — EventSource drives done
+          const hasActiveStrategy = Boolean(useStore.getState().activeStrategyId)
+          if (!hasActiveStrategy) {
+            setStep('done')
+            setRunning(false)
+          }
           break
+        }
 
         case 'stream_end':
-          setRunning(false)
+          if (!useStore.getState().activeStrategyId) {
+            setRunning(false)
+          }
           break
 
         case 'error':
@@ -348,20 +434,27 @@ export default function App() {
         addActivity({ id: nextId(), type: 'error', timestamp: Date.now(), content: String(err) })
       }
     } finally {
-      setRunning(false)
+      // Only stop running if no strategy is being monitored
+      if (!useStore.getState().activeStrategyId) {
+        setRunning(false)
+      }
     }
-  }, [reset, setRunning, setStep, setCode, setSavedCode, setLoadedStrategyName, setTools, setActiveStrategyId, setModelSettings, addActivity, updateLastActivity, modelSettings])
+  }, [reset, setRunning, setStep, setCode, setSavedCode, setLoadedStrategyName, setTools, setActiveStrategyId, openStrategyEventSource, setModelSettings, setPendingSubmission, addActivity, updateLastActivity, modelSettings])
 
   const handleStop = useCallback(() => {
     abortRef.current?.abort()
+    // Close SSE event stream
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close()
+      eventSourceRef.current = null
+    }
     setRunning(false)
     setStep('done')   // keep 'done' so the post-run panel stays visible
     const { activeStrategyId } = useStore.getState()
     if (activeStrategyId) {
-      fetch('/api/stop-strategy', {
+      fetch(`/api/strategies/${activeStrategyId}/stop`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getTraderHeaders() },
-        body: JSON.stringify({ strategy_id: activeStrategyId }),
+        headers: getTraderHeaders(),
       }).catch((err) => console.error('[stop-strategy] failed:', err))
     } else {
       console.warn('[stop] no activeStrategyId — stop_strategy not called')
@@ -414,24 +507,32 @@ export default function App() {
           const inp = event.input as Record<string, unknown>
           const code = (inp.code ?? (inp.config_json as Record<string, unknown>)?.code ?? '') as string
           if (code) setCode(code)
+          if (event.name === 'submit_strategy' && inp.strategy_id) {
+            setStep('monitoring')
+            setLeftPanel('events')
+            openStrategyEventSource(inp.strategy_id as string)
+          }
           addActivity({ id: nextId(), type: 'tool_call', timestamp: ts, toolName: event.name, toolInput: event.input, turn: event.turn })
           break
         }
         case 'tool_executing': addActivity({ id: nextId(), type: 'tool_executing', timestamp: ts, toolName: event.name, turn: event.turn }); break
         case 'tool_result':   addActivity({ id: nextId(), type: 'tool_result',    timestamp: ts, toolName: event.name, toolContent: event.content, durationMs: event.duration_ms, toolFailed: event.failed, turn: event.turn }); break
         case 'tool_error':    addActivity({ id: nextId(), type: 'tool_error',     timestamp: ts, toolName: event.name, toolError: event.error,   durationMs: event.duration_ms, turn: event.turn }); break
-        case 'strategy_submitted': setActiveStrategyId(event.strategy_id); break
-        case 'sim_commentary':
-          addActivity({ id: nextId(), type: 'sim_commentary', timestamp: ts, simCommentary: event.commentary, simPosition: event.position, simPnl: event.realized_pnl, simViolations: event.violations, turn: event.turn })
+        case 'strategy_submitted':
+          setActiveStrategyId(event.strategy_id)
+          // EventSource already opened on tool_call — don't reopen
           break
         case 'turn_complete':
           if (liveTextIdRef.current) { updateLastActivity(liveTextIdRef.current, { live: false }); liveTextIdRef.current = null }
           break
         case 'done':
           if (liveTextIdRef.current) { updateLastActivity(liveTextIdRef.current, { live: false }); liveTextIdRef.current = null }
-          setStep('done'); setRunning(false)
+          // Stay running if monitoring via EventSource
+          if (!useStore.getState().activeStrategyId) { setStep('done'); setRunning(false) }
           break
-        case 'stream_end': setRunning(false); break
+        case 'stream_end':
+          if (!useStore.getState().activeStrategyId) setRunning(false)
+          break
         case 'error':
           if (liveTextIdRef.current) { updateLastActivity(liveTextIdRef.current, { live: false }); liveTextIdRef.current = null }
           setStep('error'); setRunning(false)
@@ -441,16 +542,16 @@ export default function App() {
     }
 
     try {
-      await streamResubmit(currentCode, legs, strategyParams, handleEvent, abortRef.current.signal, modelSettings.monitorModel, startTime, endTime)
+      await streamResubmit(currentCode, legs, strategyParams, handleEvent, abortRef.current.signal, undefined, startTime, endTime)
     } catch (err: unknown) {
       if (err instanceof Error && err.name !== 'AbortError') {
         setStep('error')
         addActivity({ id: nextId(), type: 'error', timestamp: Date.now(), content: String(err) })
       }
     } finally {
-      setRunning(false)
+      if (!useStore.getState().activeStrategyId) setRunning(false)
     }
-  }, [reset, setRunning, setStep, setCode, setActiveStrategyId, addActivity, updateLastActivity, modelSettings.monitorModel])
+  }, [reset, setRunning, setStep, setCode, setActiveStrategyId, openStrategyEventSource, addActivity, updateLastActivity])
 
   const trader = getTrader()
 
@@ -499,10 +600,19 @@ export default function App() {
 
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         <div style={{ width: '45%', borderRight: '1px solid var(--border)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', color: 'var(--text-dim)', fontSize: 11, fontFamily: 'var(--font-mono)', letterSpacing: '0.1em' }}>
-            AGENT ACTIVITY
+          <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+            {(['activity', 'events'] as const).map(panel => (
+              <button key={panel} onClick={() => setLeftPanel(panel)} style={{
+                padding: '8px 14px', fontSize: 11, fontFamily: 'var(--font-mono)', letterSpacing: '0.1em',
+                fontWeight: 600, border: 'none', borderBottom: leftPanel === panel ? '2px solid var(--accent)' : '2px solid transparent',
+                background: 'transparent', color: leftPanel === panel ? 'var(--accent)' : 'var(--text-dim)',
+                cursor: 'pointer',
+              }}>
+                {panel === 'activity' ? 'AGENT ACTIVITY' : 'STRATEGY EVENTS'}
+              </button>
+            ))}
           </div>
-          <ActivityFeed />
+          {leftPanel === 'activity' ? <ActivityFeed /> : <StrategyEventsFeed />}
         </div>
 
         <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>

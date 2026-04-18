@@ -1,6 +1,9 @@
 import { useState, useCallback, useEffect, useRef, KeyboardEvent } from 'react'
 import { getTraderHeaders } from '../auth'
+import { useStore } from '../App'
 import type { ModelSettings } from '../App'
+
+const AUTO_SUBMIT_DELAY = 5 // seconds
 
 interface StrategyEntry { name: string; source: 'private' | 'shared' }
 
@@ -100,7 +103,29 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
   const [parseBusy, setParseBusy] = useState(false)
   const [startTime, setStartTime] = useState('')
   const [endTime, setEndTime] = useState('')
+  const [isFirstSubmit, setIsFirstSubmit] = useState(false)
+  const [autoSubmit, setAutoSubmit] = useState<boolean>(() => {
+    try { return localStorage.getItem('autoSubmit') !== 'false' } catch { return true }
+  })
+  const [countdown, setCountdown] = useState<number | null>(null)
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const prevRunningRef = useRef(false)
+
+  const cancelCountdown = useCallback(() => {
+    if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null }
+    setCountdown(null)
+  }, [])
+
+  const toggleAutoSubmit = useCallback(() => {
+    setAutoSubmit(v => {
+      const next = !v
+      try { localStorage.setItem('autoSubmit', String(next)) } catch { /* ignore */ }
+      return next
+    })
+  }, [])
+
+  const pendingSubmission = useStore((s) => s.pendingSubmission)
+  const setPendingSubmission = useStore((s) => s.setPendingSubmission)
 
   // Show post-run panels when a run transitions from running → stopped
   useEffect(() => {
@@ -110,9 +135,54 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
     prevRunningRef.current = isRunning
   }, [isRunning])
 
+  // When the backend emits params_ready after generation+validation,
+  // auto-open the Change Submission form pre-populated — user must explicitly submit
+  useEffect(() => {
+    if (!pendingSubmission) return
+    // Default times: NYSE session (09:30–16:00 ET)
+    const toLocal = (d: Date) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
+    const etDateStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
+    const etOffsetStr = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', timeZoneName: 'shortOffset' })
+      .formatToParts(new Date()).find(p => p.type === 'timeZoneName')?.value ?? 'GMT-4'
+    const etOffsetHours = parseInt(etOffsetStr.replace('GMT', '') || '-4')
+    const [y, mo, d] = etDateStr.split('-').map(Number)
+    const openET  = new Date(Date.UTC(y, mo - 1, d,  9 - etOffsetHours, 30))
+    const closeET = new Date(Date.UTC(y, mo - 1, d, 16 - etOffsetHours,  0))
+    setStartTime(toLocal(openET))
+    setEndTime(toLocal(closeET))
+    setLegs(pendingSubmission.legs as LegParam[])
+    setParams(pendingSubmission.params as ConfigParam[])
+    setIsFirstSubmit(pendingSubmission.isFirstSubmit)
+    setShowChangeSubmission(true)
+    setPendingSubmission(null)
+  }, [pendingSubmission, setPendingSubmission])
+
+  // Auto-submit countdown — fires when dialog opens for first-time submission and autoSubmit is on
+  const handleResubmitRef = useRef<(() => void) | null>(null)
+  useEffect(() => {
+    if (!showChangeSubmission || !isFirstSubmit || !autoSubmit) {
+      cancelCountdown()
+      return
+    }
+    setCountdown(AUTO_SUBMIT_DELAY)
+    let remaining = AUTO_SUBMIT_DELAY
+    countdownRef.current = setInterval(() => {
+      remaining -= 1
+      if (remaining <= 0) {
+        cancelCountdown()
+        handleResubmitRef.current?.()
+      } else {
+        setCountdown(remaining)
+      }
+    }, 1000)
+    return () => { cancelCountdown() }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showChangeSubmission, isFirstSubmit, autoSubmit])
+
   const openChangeSubmission = useCallback(async () => {
     if (!editorCode.trim() || parseBusy) return
     setParseBusy(true)
+    setIsFirstSubmit(false)
     setShowFeedback(false)
     // Default times: NYSE session (09:30–16:00 ET) in local browser time
     const toLocal = (d: Date) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
@@ -141,6 +211,7 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
   }, [editorCode, parseBusy])
 
   const handleResubmit = useCallback(() => {
+    cancelCountdown()
     const strategyParams: Record<string, unknown> = {}
     for (const p of params) strategyParams[p.name] = p.value
     // Convert datetime-local values (local browser time) to ISO 8601 UTC
@@ -148,7 +219,10 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
     setShowChangeSubmission(false)
     setShowFeedback(false)
     onResubmit(legs, strategyParams, editorCode, toISO(startTime), toISO(endTime))
-  }, [legs, params, editorCode, startTime, endTime, onResubmit])
+  }, [cancelCountdown, legs, params, editorCode, startTime, endTime, onResubmit])
+
+  // Keep ref in sync so the interval callback can call the latest version
+  useEffect(() => { handleResubmitRef.current = handleResubmit }, [handleResubmit])
 
   useEffect(() => {
     if (mode !== 'existing' || strategies.length > 0) return
@@ -249,6 +323,23 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
           </button>
         ))}
         <div style={{ flex: 1 }} />
+        <button
+          onClick={toggleAutoSubmit}
+          title={autoSubmit ? 'Auto-submit is ON — click to disable' : 'Auto-submit is OFF — click to enable'}
+          style={{
+            padding: '3px 10px',
+            borderRadius: 4,
+            fontSize: 11,
+            fontFamily: 'var(--font-mono)',
+            fontWeight: 600,
+            background: autoSubmit ? 'var(--accent-dim)' : 'transparent',
+            color: autoSubmit ? 'var(--accent)' : 'var(--text-muted)',
+            border: `1px solid ${autoSubmit ? 'var(--accent)' : 'var(--border)'}`,
+            cursor: 'pointer',
+          }}
+        >
+          ⚡ Auto
+        </button>
         <button
           onClick={() => setShowModels((v) => !v)}
           title="Model settings"
@@ -571,12 +662,33 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
             </div>
           </div>
 
+          {/* Auto-submit countdown bar */}
+          {countdown !== null && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ flex: 1, height: 3, borderRadius: 2, background: 'var(--border)', overflow: 'hidden' }}>
+                <div style={{
+                  height: '100%', borderRadius: 2, background: 'var(--accent)',
+                  width: `${(countdown / AUTO_SUBMIT_DELAY) * 100}%`,
+                  transition: 'width 0.9s linear',
+                }} />
+              </div>
+              <span style={{ fontSize: 11, color: 'var(--accent)', fontFamily: 'var(--font-mono)', flexShrink: 0 }}>
+                Auto-submitting in {countdown}s
+              </span>
+              <button onClick={cancelCountdown} style={{
+                padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600,
+                background: 'transparent', border: '1px solid var(--border)',
+                color: 'var(--text-dim)', cursor: 'pointer', flexShrink: 0,
+              }}>Cancel</button>
+            </div>
+          )}
+
           <div style={{ display: 'flex', gap: 6 }}>
             <button onClick={handleResubmit}
               style={{ padding: '5px 14px', borderRadius: 4, fontWeight: 600, fontSize: 12, border: 'none', background: 'var(--accent)', color: '#fff', cursor: 'pointer' }}>
-              Resubmit
+              {isFirstSubmit ? 'Submit' : 'Resubmit'}
             </button>
-            <button onClick={() => { setShowChangeSubmission(false); setShowFeedback(true) }}
+            <button onClick={() => { cancelCountdown(); setShowChangeSubmission(false); setShowFeedback(true) }}
               style={{ padding: '5px 14px', borderRadius: 4, fontWeight: 600, fontSize: 12, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-dim)', cursor: 'pointer' }}>
               Back
             </button>

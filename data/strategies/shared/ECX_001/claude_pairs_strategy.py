@@ -694,7 +694,7 @@ class ClaudePairsStrategy(LumitecBaseStrategy):
                 self._discard_order_id(oid)
             if not self._has_any_position():
                 if self._shutting_down:
-                    self.forced_stop("Shutdown complete — positions neutralized", "MANUAL")
+                    self.forced_stop("Shutdown complete — positions neutralized", "SYSTEM")
                 else:
                     self._complete_cycle()
 
@@ -942,7 +942,7 @@ class ClaudePairsStrategy(LumitecBaseStrategy):
         if self._has_pending_orders():
             return
         if not self._has_any_position():
-            self.forced_stop("Shutdown complete — positions flat", "MANUAL")
+            self.forced_stop("Shutdown complete — positions flat", "SYSTEM")
             return
         self.observe("Neutralizing positions with market orders", context={
             "pos_qty_a": self._pos_qty["A"],

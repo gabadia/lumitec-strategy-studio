@@ -233,7 +233,7 @@ class TwapExecution(LumitecBaseStrategy):
             self.observe("Target reached — stopping", context={
                 "total_filled": self._total_filled,
             })
-            self.forced_stop("Target quantity filled", "MANUAL")
+            self.stop()
             return
 
         # Check if all slices already sent
@@ -308,7 +308,7 @@ class TwapExecution(LumitecBaseStrategy):
 
         if self._total_filled >= self.params.target_qty:
             self._shutting_down = True
-            self.forced_stop("Target quantity filled", "MANUAL")
+            self.stop()
 
     def on_order_rejected(self, event) -> None:
         oid = event.client_order_id.value

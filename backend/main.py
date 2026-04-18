@@ -2,12 +2,21 @@
 Lumitec Strategy Studio — FastAPI backend.
 
 Endpoints:
-  POST /run-strategy          — streams SSE events as Claude executes the workflow
-  GET  /strategies            — list .py files for the trader (private + org-shared)
-  GET  /strategies/{name}     — return source code (private takes priority over shared)
-  PUT  /strategies/{name}     — save to trader's private directory
-  POST /stop-strategy         — call stop_strategy on the MCP server
-  GET  /health                — liveness check
+  POST /run-strategy                          — streams SSE as Claude executes workflow
+  GET  /strategies                            — list .py files for the trader
+  GET  /strategies/{name}                     — return source code
+  PUT  /strategies/{name}                     — save to trader's private directory
+  GET  /health                                — liveness check
+
+  Execution plane proxy (→ Orchestrator port 8000):
+  POST /api/strategies/{strategy_id}/stop     — stop a running strategy
+  POST /api/strategies/{strategy_id}/pause    — pause a running strategy
+  POST /api/strategies/{strategy_id}/resume   — resume a paused strategy
+  PATCH /api/strategies/{strategy_id}/params  — update strategy parameters
+  GET  /api/strategies/{strategy_id}/status   — get strategy status
+
+  SSE relay (→ SSE Gateway port 9001):
+  GET  /api/strategies/{strategy_id}/events   — real-time event stream filtered by strategy_id
 
 Directory layout (under STRATEGIES_DIR):
   {trader_id}/           ← trader's private strategies
@@ -20,6 +29,7 @@ import os
 import re
 from pathlib import Path
 
+import httpx
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
@@ -27,14 +37,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from mcp import ClientSession
-from mcp.client.sse import sse_client
-
 from agent import (
     run_strategy_workflow,
     run_resubmit_workflow,
     _parse_submission,
     _stream_text,
+    _TERMINAL_EVENTS,
+    _resolve_termination_type,
+    ORCHESTRATOR_URL,
+    SUPERVISOR_ID,
     AVAILABLE_MODELS,
     DEFAULT_GENERATE_MODEL,
     DEFAULT_VALIDATE_MODEL,
@@ -42,6 +53,8 @@ from agent import (
 )
 
 load_dotenv()
+
+SSE_GATEWAY_URL = os.getenv("SSE_GATEWAY_URL", "http://localhost:9001")
 
 app = FastAPI(title="Lumitec Strategy Studio")
 
@@ -219,20 +232,169 @@ async def save_strategy(name: str, request: Request, body: SaveStrategyRequest):
 
 
 @app.post("/stop-strategy")
-async def stop_strategy(request: StopStrategyRequest):
-    """Call stop_strategy on the MCP server for the given strategy_id."""
-    mcp_url = os.getenv("MCP_SERVER_URL", "http://localhost:8002/sse")
+async def stop_strategy_legacy(request: StopStrategyRequest):
+    """Legacy stop endpoint — proxies to Orchestrator port 8000."""
+    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{SUPERVISOR_ID}/strategies/{request.strategy_id}/stop"
     try:
-        async with sse_client(mcp_url) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                await session.call_tool(
-                    "stop_strategy",
-                    arguments={"strategy_id": request.strategy_id},
-                )
-                return {"stopped": True, "strategy_id": request.strategy_id}
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, timeout=10.0)
+        return {"stopped": response.status_code in (200, 204), "strategy_id": request.strategy_id}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Execution plane proxy (→ Orchestrator port 8000)
+# ---------------------------------------------------------------------------
+
+@app.post("/strategies/{strategy_id}/stop")
+async def api_stop_strategy(strategy_id: str):
+    """Stop a running strategy via Orchestrator."""
+    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{SUPERVISOR_ID}/strategies/{strategy_id}/stop"
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, timeout=10.0)
+        if response.status_code not in (200, 204):
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        return {"stopped": True, "strategy_id": strategy_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/strategies/{strategy_id}/pause")
+async def api_pause_strategy(strategy_id: str):
+    """Pause a running strategy via Orchestrator."""
+    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{SUPERVISOR_ID}/strategies/{strategy_id}/pause"
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, timeout=10.0)
+        if response.status_code not in (200, 204):
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        return {"paused": True, "strategy_id": strategy_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/strategies/{strategy_id}/resume")
+async def api_resume_strategy(strategy_id: str):
+    """Resume a paused strategy via Orchestrator."""
+    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{SUPERVISOR_ID}/strategies/{strategy_id}/resume"
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, timeout=10.0)
+        if response.status_code not in (200, 204):
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        return {"resumed": True, "strategy_id": strategy_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.patch("/strategies/{strategy_id}/params")
+async def api_update_params(strategy_id: str, request: Request):
+    """Update strategy parameters via Orchestrator."""
+    body = await request.json()
+    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{SUPERVISOR_ID}/strategies/{strategy_id}/params"
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.patch(url, json=body, timeout=10.0)
+        if response.status_code not in (200, 204):
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        return response.json() if response.content else {"updated": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/strategies/{strategy_id}/status")
+async def api_get_status(strategy_id: str):
+    """Get strategy status from Orchestrator."""
+    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{SUPERVISOR_ID}/strategies/{strategy_id}"
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, timeout=10.0)
+        if response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        return response.json()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# SSE relay (→ SSE Gateway port 9001)
+# ---------------------------------------------------------------------------
+
+@app.get("/strategies/{strategy_id}/events")
+async def api_strategy_events(strategy_id: str):
+    """
+    Subscribe to real-time events for a specific strategy.
+    Connects to the SSE gateway on port 9001, filters by strategy_id,
+    enriches terminal events with termination_type, and streams to browser.
+    """
+    async def event_stream():
+        gateway_url = f"{SSE_GATEWAY_URL}/stream"
+        try:
+            async with httpx.AsyncClient() as client:
+                async with client.stream(
+                    "GET",
+                    gateway_url,
+                    headers={"Accept": "text/event-stream", "Cache-Control": "no-cache"},
+                    timeout=None,
+                ) as response:
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        raw = line[5:].strip()
+                        if not raw:
+                            continue
+                        try:
+                            event = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+
+                        # Resolve event type — skip heartbeats and empty events
+                        event_type = event.get("event_type") or event.get("type", "")
+                        if not event_type:
+                            continue
+
+                        # Filter by strategy_id
+                        data_field = event.get("data")
+                        event_sid = event.get("strategy_id") or (data_field.get("strategy_id", "") if isinstance(data_field, dict) else "")
+                        print(f"[sse-relay] type={event_type!r} sid={event_sid!r} target={strategy_id!r}", flush=True)
+                        if event_sid and event_sid != strategy_id:
+                            continue
+
+                        # Enrich terminal events with termination_type
+                        if event_type in _TERMINAL_EVENTS:
+                            content_str = json.dumps(event)
+                            event["termination_type"] = _resolve_termination_type(event_type, content_str)
+
+                        yield f"data: {json.dumps(event)}\n\n"
+
+                        # Stop relaying after terminal event
+                        if "termination_type" in event:
+                            break
+
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'relay_error', 'message': str(exc)})}\n\n"
+        finally:
+            yield "data: {\"type\": \"stream_end\"}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/parse-strategy")

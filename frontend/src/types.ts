@@ -13,6 +13,7 @@ export type StudioEventType =
   | 'rate_limit_retry'
   | 'strategy_submitted'
   | 'sim_commentary'
+  | 'params_ready'
   | 'done'
   | 'stream_end'
   | 'error'
@@ -38,6 +39,13 @@ export interface SimCommentaryEvent {
   termination_reason?: string | null
   turn: number
 }
+export interface ParamsReadyEvent {
+  type: 'params_ready'
+  code: string
+  legs: Array<{ leg_id: string; symbol: string; quantity: number; side: string; tif: string }>
+  params: Array<{ name: string; type: 'int' | 'float' | 'bool' | 'str'; value: string | number | boolean }>
+  turn: number
+}
 export interface DoneEvent { type: 'done' }
 export interface StreamEndEvent { type: 'stream_end' }
 export interface ErrorEvent { type: 'error'; message: string }
@@ -47,7 +55,17 @@ export type StudioEvent =
   | ToolCallStartEvent | ToolCallEvent | ToolExecutingEvent
   | ToolResultEvent | ToolErrorEvent | TurnCompleteEvent
   | RateLimitRetryEvent | StrategySubmittedEvent | SimCommentaryEvent
-  | DoneEvent | StreamEndEvent | ErrorEvent
+  | ParamsReadyEvent | DoneEvent | StreamEndEvent | ErrorEvent
+
+// Raw supervisor event from SSE gateway (port 9001 → relayed via 8089)
+export interface StrategyRawEvent {
+  id: string                          // generated client-side
+  timestamp: number                   // client-side receive time
+  eventType: string                   // event_type from supervisor
+  strategyId?: string
+  raw: Record<string, unknown>        // full raw event object from gateway
+  terminationType?: string            // enriched by backend for terminal events
+}
 
 // Activity feed entry
 export interface ActivityEntry {

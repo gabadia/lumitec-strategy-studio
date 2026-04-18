@@ -68,9 +68,10 @@ from lumitec.strategy.definitions import LegMode, StrategyMission, StrategyObjec
 | 14 | `validate_legs()` classmethod enforcing leg count and side |
 | 15 | `isPaused()` guard at top of every market data handler |
 | 16 | `on_pause()` / `on_resume()` hooks |
-| 17 | `self.observe()` calls in every market data handler logging signal values |
-| 18 | `self.decide()` calls before every entry and exit decision |
-| 19 | `self.act()` calls after every order submission, cancellation, and forced_stop |
+| 17 | `self.params` and `self._param_lock = RLock()` initialised in `__init__`, not `on_start` |
+| 18 | `self.observe()` calls in every market data handler logging signal values |
+| 19 | `self.decide()` calls before every entry and exit decision |
+| 20 | `self.act()` calls after every order submission, cancellation, and forced_stop |
 
 ---
 

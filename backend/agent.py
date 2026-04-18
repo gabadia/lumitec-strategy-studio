@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 from typing import AsyncIterator, Any
 
 import anthropic
+import httpx
 from dotenv import load_dotenv
 from mcp import ClientSession
 from mcp.client.sse import sse_client
@@ -32,6 +33,8 @@ load_dotenv(override=True)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY", "")
 MCP_SERVER_URL    = os.getenv("MCP_SERVER_URL", "http://localhost:8002/sse")
+ORCHESTRATOR_URL  = os.getenv("ORCHESTRATOR_URL", "http://localhost:8000")
+SUPERVISOR_ID     = os.getenv("SUPERVISOR_ID", "NUAM-DEV")
 
 # ─── Prompt paths ────────────────────────────────────────────────────────────
 _PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
@@ -70,8 +73,7 @@ MAX_TOKENS              = 8096
 MAX_RETRIES             = 5
 RETRY_BASE_DELAY        = 60
 MAX_VALIDATION_ATTEMPTS = 3
-MAX_SIMULATION_POLLS    = 60
-MONITOR_BATCH_SIZE      = 5   # call OpenAI monitor every N polls
+MAX_SIMULATION_POLLS    = 60  # kept for reference, no longer used in agent
 
 # ─── Clients ─────────────────────────────────────────────────────────────────
 _anthropic = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
@@ -218,12 +220,12 @@ def _extract_metadata(code: str, intent: str = "") -> dict:
                     side = side_match.group(1).upper()
                 else:
                     side = "BUY"  # user-selectable — default to BUY for submission
-                leg_id = chr(ord('A') + i) if len(entries) > 1 else "main"
+                leg_id = chr(ord('A') + i)
                 legs.append({"leg_id": leg_id, "symbol": symbol, "quantity": 100, "side": side, "tif": "DAY"})
         except Exception:
             pass
     if not legs:
-        legs = [{"leg_id": "main", "symbol": symbol, "quantity": 100, "side": "BUY", "tif": "DAY"}]
+        legs = [{"leg_id": "A", "symbol": symbol, "quantity": 100, "side": "BUY", "tif": "DAY"}]
 
     return {
         "class_name": class_name,
@@ -684,7 +686,6 @@ def _unnest_config_classes(code: str) -> str:
 
 
 async def _phase_submit(
-    session: ClientSession,
     code: str,
     metadata: dict,
     start_iso: str,
@@ -732,7 +733,7 @@ async def _phase_submit(
         "log_quotes": True,
         "strategy_params": strategy_params or {},
         "legs": metadata.get("legs", [
-            {"leg_id": "main", "symbol": metadata.get("symbol", "AAPL"),
+            {"leg_id": "A", "symbol": metadata.get("symbol", "AAPL"),
              "quantity": 100, "side": "BUY", "tif": "DAY"}
         ]),
         "start_time": start_iso,
@@ -766,10 +767,13 @@ async def _phase_submit(
                 strategy_match = re.search(r'\nclass ' + re.escape(class_name), code)
                 if strategy_match:
                     code = code[:strategy_match.start()] + '\n\n' + config_block + code[strategy_match.start():]
-        result = await session.call_tool("submit_strategy", {"config_json": config})
+        submit_url = f"{ORCHESTRATOR_URL}/v1/supervisors/{SUPERVISOR_ID}/strategies/submit"
+        print(f"[submit] POST {submit_url}", flush=True)
+        async with httpx.AsyncClient() as client:
+            response = await client.post(submit_url, json=config, timeout=30.0)
         duration_ms = int((time.monotonic() - t0) * 1000)
-        content = _content_to_str(result.content)
-        print(f"[submit] result isError={result.isError} content={content[:300]}", flush=True)
+        content = response.text
+        print(f"[submit] HTTP {response.status_code} content={content[:300]}", flush=True)
     except Exception as exc:
         duration_ms = int((time.monotonic() - t0) * 1000)
         print(f"[submit] EXCEPTION: {exc}", flush=True)
@@ -778,7 +782,12 @@ async def _phase_submit(
         yield {"type": "_submit_done", "success": False, "strategy_id": None}
         return
 
-    submit_ok = not result.isError and '"status": "success"' in content
+    # Parse response to check success — avoid string matching on JSON formatting
+    try:
+        resp_json = response.json()
+        submit_ok = response.status_code in (200, 201) and resp_json.get("status") == "success"
+    except Exception:
+        submit_ok = False
 
     yield {
         "type": "tool_result",
@@ -840,155 +849,6 @@ def _resolve_termination_type(terminal_str: str, content: str) -> str:
     return _TERMINAL_EVENTS[terminal_str] or "FAILED"
 
 
-async def _phase_openai_monitor(
-    session: ClientSession,
-    strategy_id: str,
-    metadata: dict,
-    intent_text: str,
-    monitor_system: str,
-    turn: int,
-    monitor_model: str,
-) -> AsyncIterator[dict]:
-    """
-    Polls stream_events and uses OpenAI to maintain a running audit state.
-    Yields tool_result, tool_error, and sim_commentary SSE events.
-    Yields {"type": "_monitor_done", "state": dict} at the end.
-    """
-    state = SimulationState()
-    constraints = {
-        "class_name": metadata.get("class_name", "Unknown"),
-        "max_position": 1000,
-        "max_loss": 500,
-        **metadata.get("constraints", {}),
-    }
-    monitor_base = {
-        "strategy_intent": (intent_text or "")[:1000],
-        "constraints": constraints,
-    }
-
-    event_buffer: list[str] = []
-    poll_count = 0
-
-    for _ in range(MAX_SIMULATION_POLLS):
-        yield {"type": "tool_executing", "name": "stream_events", "turn": turn}
-        t0 = time.monotonic()
-        try:
-            sim_r = await session.call_tool("stream_events", {"strategy_id": strategy_id})
-            sim_ms = int((time.monotonic() - t0) * 1000)
-            sim_content = _content_to_str(sim_r.content)
-        except Exception as exc:
-            sim_ms = int((time.monotonic() - t0) * 1000)
-            err = f"stream_events failed: {exc}"
-            yield {"type": "tool_error", "id": f"sim_{poll_count}", "name": "stream_events",
-                   "error": err, "duration_ms": sim_ms, "turn": turn}
-            state.terminated = True
-            state.termination_reason = err
-            state.termination_type = "SUPERVISOR_ERROR"
-            break
-
-        yield {
-            "type": "tool_result",
-            "id": f"sim_{poll_count}",
-            "name": "stream_events",
-            "content": sim_content[:2000],
-            "duration_ms": sim_ms,
-            "turn": turn,
-        }
-
-        if sim_content:
-            event_buffer.append(sim_content)
-        poll_count += 1
-
-        # ── Direct terminal check (always runs, regardless of OpenAI) ─────
-        for terminal_str in _TERMINAL_EVENTS:
-            if terminal_str in sim_content:
-                state.terminated = True
-                state.termination_type = _resolve_termination_type(terminal_str, sim_content)
-                state.termination_reason = terminal_str
-                break
-
-        # ── Fallback: if stream returned nothing, check strategy status ────
-        if not sim_content and not state.terminated:
-            try:
-                status_r = await session.call_tool("get_strategy_status", {"strategy_id": strategy_id})
-                status_content = _content_to_str(status_r.content)
-                print(f"[monitor] empty stream — status check: {status_content[:200]}", flush=True)
-                for terminal_str in _TERMINAL_EVENTS:
-                    if terminal_str in status_content:
-                        state.terminated = True
-                        state.termination_type = _resolve_termination_type(terminal_str, status_content)
-                        state.termination_reason = terminal_str
-                        break
-                # Also catch status fields like "stopped", "failed", "completed"
-                if not state.terminated:
-                    for status_word, terminal_type in (("stopped", "STOPPED_BY_USER"), ("failed", "FAILED"), ("completed", "COMPLETED")):
-                        if f'"status": "{status_word}"' in status_content or f"'status': '{status_word}'" in status_content:
-                            state.terminated = True
-                            state.termination_type = terminal_type
-                            state.termination_reason = f"status={status_word}"
-                            break
-            except Exception as exc:
-                print(f"[monitor] status check failed: {exc}", flush=True)
-
-        # ── Monitor batch ─────────────────────────────────────────────────
-        should_call_monitor = (
-            event_buffer
-            and (poll_count % MONITOR_BATCH_SIZE == 0 or state.terminated or bool(sim_content))
-        )
-        if should_call_monitor:
-            monitor_input = {
-                **monitor_base,
-                "current_state": state.to_dict(),
-                "new_events": event_buffer[-20:],
-            }
-            try:
-                raw = await _complete(monitor_model, monitor_system, json.dumps(monitor_input), json_mode=True)
-                monitor_result = json.loads(raw)
-
-                # Update state
-                if "state" in monitor_result:
-                    s = monitor_result["state"]
-                    state.position               = s.get("position",               state.position)
-                    state.realized_pnl           = s.get("realized_pnl",           state.realized_pnl)
-                    state.unrealized_pnl         = s.get("unrealized_pnl",         state.unrealized_pnl)
-                    state.total_fills            = s.get("total_fills",            state.total_fills)
-                    state.total_orders_submitted = s.get("total_orders_submitted", state.total_orders_submitted)
-                    state.total_orders_cancelled = s.get("total_orders_cancelled", state.total_orders_cancelled)
-                    state.total_orders_rejected  = s.get("total_orders_rejected",  state.total_orders_rejected)
-                    state.open_orders            = s.get("open_orders",            state.open_orders)
-                    state.fills                  = s.get("fills",                  state.fills)
-                    state.violations             = s.get("violations",             state.violations)
-                    if s.get("terminated"):
-                        state.terminated         = True
-                        state.termination_reason = s.get("termination_reason") or state.termination_reason
-                        state.termination_type   = s.get("termination_type")   or state.termination_type
-
-                commentary = monitor_result.get("commentary")
-                violations_batch = monitor_result.get("violations_this_batch", [])
-                if commentary:
-                    yield {
-                        "type": "sim_commentary",
-                        "commentary": commentary,
-                        "position": state.position,
-                        "realized_pnl": state.realized_pnl,
-                        "violations": violations_batch,
-                        "terminated": state.terminated,
-                        "termination_reason": state.termination_reason,
-                        "turn": turn,
-                    }
-
-            except Exception as exc:
-                yield {"type": "tool_error", "id": f"monitor_{poll_count}", "name": "openai_monitor",
-                       "error": str(exc), "duration_ms": 0, "turn": turn}
-
-            event_buffer.clear()
-
-        if state.terminated:
-            break
-
-    yield {"type": "_monitor_done", "state": state.to_dict()}
-
-
 # ─── Orchestrator ─────────────────────────────────────────────────────────────
 
 async def run_strategy_workflow(
@@ -1004,25 +864,24 @@ async def run_strategy_workflow(
     Main entry point. Yields SSE-ready dicts.
 
     workflow_mode:
-      "fast" → Phase 1 → 2 → 5 → 6  (generate, validate, submit, monitor)
-      "full" → Phase 1 → 2 → 3 → 4 → 5 → 6  (+ test scenarios + evaluate behavior)
+      "fast" → Phase 1 → 2 → 5  (generate, validate, submit)
+      "full" → Phase 1 → 2 → 3 → 4 → 5  (+ test scenarios + evaluate behavior)
+    Monitoring is handled by the SSE relay in main.py after strategy_submitted.
     """
     gen_model = generate_model or DEFAULT_GENERATE_MODEL
     val_model = validate_model or DEFAULT_VALIDATE_MODEL
-    mon_model = monitor_model  or DEFAULT_MONITOR_MODEL
 
     claude_system     = _load_generation_system()
     validation_system = _load_fixing_system()
     testing_system    = _load_testing_system()
     reasoning_system  = _load_reasoning_system()
-    monitor_system    = _load_monitor_system()
 
     try:
         async with sse_client(MCP_SERVER_URL) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
 
-                BLOCKED = {"publish_strategy", "stream_events"}
+                BLOCKED = {"publish_strategy", "stream_events", "submit_strategy"}
                 tools_response = await session.list_tools()
                 tool_names = [t.name for t in tools_response.tools if t.name not in BLOCKED]
                 yield {"type": "tools_ready", "tools": tool_names, "count": len(tool_names)}
@@ -1104,52 +963,20 @@ async def run_strategy_workflow(
                         if event["type"] != "_reasoning_done":
                             yield event
 
-                # ── Phase 5: Submit ────────────────────────────────────────
-                submit_turn = (reasoning_turn + 1) if workflow_mode == "full" else (summary_turn + 1)
-                strategy_id = None
-
-                async for event in _phase_submit(
-                    session, code, metadata, start_iso, end_iso, uid8, submit_turn
-                ):
-                    if event["type"] == "_submit_done":
-                        strategy_id = event["strategy_id"] if event["success"] else None
-                    else:
-                        yield event
-
-                if not strategy_id:
-                    msg = "Strategy submission failed."
-                    yield {"type": "text_delta", "delta": msg, "turn": submit_turn}
-                    yield {"type": "turn_complete", "turn": submit_turn, "stop_reason": "end_turn"}
-                    yield {"type": "done"}
-                    return
-
-                # ── Phase 6: Monitor ───────────────────────────────────────
-                monitor_turn = submit_turn + 1
-                final_state: dict | None = None
-
-                async for event in _phase_openai_monitor(
-                    session, strategy_id, metadata, intent_text, monitor_system, monitor_turn, mon_model
-                ):
-                    if event["type"] == "_monitor_done":
-                        final_state = event["state"]
-                    else:
-                        yield event
-
-                # Final summary
-                final_summary_turn = monitor_turn + 1
-                if final_state:
-                    clean_state = _prepare_final_state(final_state)
-                    try:
-                        summary = await _complete(
-                            mon_model,
-                            _SUMMARY_SYSTEM_PROMPT,
-                            f"Strategy: {metadata.get('class_name')}\nIntent: {intent[:500]}\nFinal state: {json.dumps(clean_state)}",
-                        )
-                    except Exception:
-                        summary = _default_summary(clean_state)
-                    yield {"type": "text_delta", "delta": summary, "turn": final_summary_turn}
-                yield {"type": "turn_complete", "turn": final_summary_turn, "stop_reason": "end_turn"}
-
+                # ── Phase 5: Emit params_ready — frontend handles explicit submission ─
+                # strategy_params must always be explicitly provided by the caller;
+                # we never silently infer them. Parse the code here and hand the
+                # defaults to the frontend so the user can review/edit before submit.
+                params_turn = (reasoning_turn + 1) if workflow_mode == "full" else (summary_turn + 1)
+                parsed = _parse_submission(code)
+                yield {
+                    "type": "params_ready",
+                    "code": code,
+                    "legs": parsed["legs"],
+                    "params": parsed["params"],
+                    "turn": params_turn,
+                }
+                yield {"type": "turn_complete", "turn": params_turn, "stop_reason": "end_turn"}
                 yield {"type": "done"}
 
     except BaseException as exc:
@@ -1174,10 +1001,8 @@ async def run_resubmit_workflow(
     """
     Skip Phase 1 (generation) and Phase 2 (validation).
     Use the existing validated code with user-supplied legs and params.
-    Goes straight to Phase 3 (submit) + Phase 4 (monitor).
+    Goes straight to submit via Orchestrator REST API.
     """
-    mon_model = monitor_model or DEFAULT_MONITOR_MODEL
-    monitor_system = _load_monitor_system()
 
     ET = ZoneInfo("America/New_York")
     today_et = datetime.now(ET).date()
@@ -1192,57 +1017,31 @@ async def run_resubmit_workflow(
     uid8 = uuid.uuid4().hex[:8]
 
     try:
-        async with sse_client(MCP_SERVER_URL) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
+        metadata = _extract_metadata(code)
+        metadata["legs"] = legs  # user-supplied legs override extracted ones
 
-                metadata = _extract_metadata(code)
-                metadata["legs"] = legs  # user-supplied legs override extracted ones
+        yield {"type": "text_delta", "delta": "**Resubmitting with updated legs and parameters…**\n", "turn": 1}
 
-                yield {"type": "text_delta", "delta": "**Resubmitting with updated legs and parameters…**\n", "turn": 1}
+        # Submit via Orchestrator REST API
+        strategy_id = None
+        async for event in _phase_submit(
+            code, metadata, start_iso, end_iso, uid8, turn=1,
+            strategy_params=strategy_params,
+        ):
+            if event["type"] == "_submit_done":
+                strategy_id = event["strategy_id"] if event["success"] else None
+            else:
+                yield event
 
-                # Phase 3: Submit
-                strategy_id = None
-                async for event in _phase_submit(
-                    session, code, metadata, start_iso, end_iso, uid8, turn=1,
-                    strategy_params=strategy_params,
-                ):
-                    if event["type"] == "_submit_done":
-                        strategy_id = event["strategy_id"] if event["success"] else None
-                    else:
-                        yield event
+        if not strategy_id:
+            yield {"type": "text_delta", "delta": "Resubmission failed.", "turn": 1}
+            yield {"type": "turn_complete", "turn": 1, "stop_reason": "end_turn"}
+            yield {"type": "done"}
+            return
 
-                if not strategy_id:
-                    yield {"type": "text_delta", "delta": "Resubmission failed.", "turn": 1}
-                    yield {"type": "turn_complete", "turn": 1, "stop_reason": "end_turn"}
-                    yield {"type": "done"}
-                    return
-
-                # Phase 4: Monitor
-                final_state: dict | None = None
-                async for event in _phase_openai_monitor(
-                    session, strategy_id, metadata, "", monitor_system, turn=2, monitor_model=mon_model
-                ):
-                    if event["type"] == "_monitor_done":
-                        final_state = event["state"]
-                    else:
-                        yield event
-
-                summary_turn = 3
-                if final_state:
-                    clean_state = _prepare_final_state(final_state)
-                    try:
-                        summary = await _complete(
-                            mon_model,
-                            _SUMMARY_SYSTEM_PROMPT,
-                            f"Strategy: {metadata.get('class_name')}\nFinal state: {json.dumps(clean_state)}",
-                        )
-                    except Exception:
-                        summary = _default_summary(clean_state)
-                    yield {"type": "text_delta", "delta": summary, "turn": summary_turn}
-
-                yield {"type": "turn_complete", "turn": summary_turn, "stop_reason": "end_turn"}
-                yield {"type": "done"}
+        # Workflow ends here — monitoring is handled via SSE relay in main.py
+        yield {"type": "turn_complete", "turn": 1, "stop_reason": "end_turn"}
+        yield {"type": "done"}
 
     except BaseException as exc:
         import traceback

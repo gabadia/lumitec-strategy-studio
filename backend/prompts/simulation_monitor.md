@@ -55,7 +55,7 @@ Maintain and return this state object on every call:
       "price": 0.0,
       "status": "SUBMITTED|ACKNOWLEDGED|PARTIALLY_FILLED",
       "filled_qty": 0,
-      "leg_id": "A|B|main"
+      "leg_id": "A|B|C"
     }
   },
   "fills": [

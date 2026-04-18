@@ -20,6 +20,12 @@ class MyStrategy(LumitecBaseStrategy):
 
 `leg_schema` fields: `label` (string shown in UI), `side` (`"BUY"`, `"SELL"`, or `None` for user-selectable), `fixed_side` (`True` locks the side in the UI).
 
+**`leg_id` naming convention** — must be consistent across `leg_schema`, submission payload, and every `submit_limit_order` / `submit_market_order` call:
+- Single-leg strategies: always `"A"`
+- Multi-leg strategies: `"A"`, `"B"`, `"C"`, … in leg declaration order
+
+`"main"` is not a valid `leg_id` — the supervisor will not match it to any declared leg.
+
 Available `LegMode` values:
 
 | Value | Description |
@@ -108,6 +114,27 @@ class ConfigParams:
 ---
 
 ## Required hooks
+
+### \_\_init\_\_ — initialise params and lock here, not in on_start
+
+**CRITICAL:** During every strategy submission the supervisor calls `configure()` on the new instance immediately after `__init__()`, before `on_start()` runs. When `strategy_params` are included in the submission (i.e. any non-default parameter values), `configure()` calls `apply_params()`, which requires `self._param_lock`. If the lock is created in `on_start()` instead of `__init__()`, the strategy crashes at startup whenever non-default params are submitted.
+
+```python
+def __init__(self, config: Config):
+    super().__init__(config)
+    self.params = ConfigParams.from_config(config)   # load params at construction
+    self._param_lock = RLock()                       # MUST be here — not in on_start
+    # ... strategy-specific state variables
+```
+
+❌ Wrong — lock created too late:
+```python
+def on_start(self) -> None:
+    super().on_start()
+    self._param_lock = RLock()   # WRONG: configure() runs before on_start()
+```
+
+---
 
 ### set_oms_type — mandatory, without it the strategy crashes on startup
 ```python
@@ -214,7 +241,7 @@ order = self.submit_limit_order(
     qty=100,
     price=Price.from_str("150.25"),
     tif=TimeInForce.DAY,
-    leg_id="A",     # used to track fills per leg
+    leg_id="A",     # single-leg: always "A"; multi-leg: "A", "B", "C", …
     role="OPEN",    # OPEN / CLOSE / NEUTRALIZE
 )
 order_id_str = order.client_order_id.value
@@ -355,28 +382,31 @@ Never override `pause()` or `resume()` directly — those are base class methods
 
 `forced_stop(reason, stop_reason)` is the only correct way to stop a strategy from within. It emits a `FORCED_STOP` lifecycle event (consumed by the aggregator and SSE gateway), then calls Nautilus `stop()`.
 
-`stop_reason` must be one of: `"MANUAL"` | `"TIME"` | `"RISK"` | `"SYSTEM"`
+`stop_reason` must be one of: `"TIME"` | `"RISK"` | `"SYSTEM"`
 
 ```python
-# Strategy completed its objective (target filled, positions neutralised, etc.)
-self.forced_stop("Target quantity filled", "MANUAL")
+# Strategy completed its objective (target filled, positions neutralised, etc.) — use plain stop()
+self.stop()
 
-# Risk limit hit (max loss, max gain, stop-loss, drawdown, etc.)
+# Risk limit hit (max loss, max gain, stop-loss, drawdown, etc.) — use forced_stop()
 self.forced_stop("Max loss reached", "RISK")
+
+# Session window expired — use forced_stop()
+self.forced_stop("End time reached", "TIME")
 ```
 
-> **`manual_stop()` no longer exists.** Every call site must use `forced_stop(reason, stop_reason)`.
-> If a strategy calls plain `stop()` instead, the blotter/SSE will not receive a `FORCED_STOP` event
-> and `stop_reason` will be lost.
+> **`manual_stop()` no longer exists.**
+> Use `self.stop()` when the strategy fulfils its own objective.
+> Use `self.forced_stop(reason, stop_reason)` for all other terminations (risk, time, system).
 
 ---
 
 ## Validation checklist
 
-Before publishing, all 16 of these must be present in your file:
+Before publishing, all 17 of these must be present in your file:
 
 | # | Pattern |
-|---|---------|
+|---|------|
 | 1 | `@dataclass(frozen=True)` on ConfigParams |
 | 2 | `validate()` method in ConfigParams |
 | 3 | `merged()` method in ConfigParams |
@@ -393,6 +423,7 @@ Before publishing, all 16 of these must be present in your file:
 | 14 | `validate_legs()` classmethod enforcing leg count and side |
 | 15 | `isPaused()` guard at top of every market data handler |
 | 16 | `on_pause()` / `on_resume()` hooks (not `pause()`/`resume()`) |
+| 17 | `self.params` and `self._param_lock = RLock()` initialised in `__init__`, not `on_start` |
 
 Forbidden imports (publish will be rejected if found):
 `subprocess`, `socket`, `requests`, `os.system`, `urllib`
