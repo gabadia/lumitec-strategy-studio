@@ -1,6 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { getTraderHeaders } from '../auth'
-import type { ActivityEntry } from '../types'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -9,47 +8,21 @@ interface Message {
 }
 
 interface Props {
-  activity: ActivityEntry[]
-  code: string
+  strategyId: string | null
   modelSettings: { generateModel: string }
 }
 
-function buildContext(activity: ActivityEntry[], code: string): string {
-  const parts: string[] = []
-
-  if (code.trim()) {
-    parts.push(`STRATEGY CODE:\n\`\`\`python\n${code.trim()}\n\`\`\``)
-  }
-
-  const relevant = activity.filter(e =>
-    e.type === 'text_delta' ||
-    e.type === 'sim_commentary' ||
-    (e.type === 'tool_result' && (e.toolName === 'stream_events' || e.toolName === 'get_strategy_status'))
-  )
-
-  const eventLines: string[] = []
-  for (const e of relevant) {
-    if (e.type === 'text_delta' && e.content) {
-      eventLines.push(`[AGENT]: ${e.content.trim()}`)
-    } else if (e.type === 'sim_commentary' && e.simCommentary) {
-      eventLines.push(`[MONITOR]: ${e.simCommentary.trim()} | position=${e.simPosition ?? 0} pnl=${e.simPnl ?? 0}`)
-    } else if (e.type === 'tool_result' && e.toolContent) {
-      eventLines.push(`[${e.toolName?.toUpperCase()}]: ${e.toolContent.trim().slice(0, 800)}`)
-    }
-  }
-
-  if (eventLines.length > 0) {
-    parts.push(`RUN EVENTS:\n${eventLines.join('\n')}`)
-  }
-
-  return parts.join('\n\n')
-}
-
-export default function RunQA({ activity, code, modelSettings }: Props) {
+export default function RunQA({ strategyId, modelSettings }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
+
+  // Clear conversation when the active strategy changes
+  useEffect(() => {
+    setMessages([])
+    setInput('')
+  }, [strategyId])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -57,7 +30,7 @@ export default function RunQA({ activity, code, modelSettings }: Props) {
 
   const sendQuestion = useCallback(async () => {
     const q = input.trim()
-    if (!q || busy) return
+    if (!q || busy || !strategyId) return
     setInput('')
     setBusy(true)
 
@@ -69,13 +42,13 @@ export default function RunQA({ activity, code, modelSettings }: Props) {
     ])
 
     try {
-      const response = await fetch('/api/ask-run', {
+      const response = await fetch('/api/analyze-execution', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...getTraderHeaders() },
         body: JSON.stringify({
+          strategy_id: strategyId,
           question: q,
           history,
-          context: buildContext(activity, code),
           model: modelSettings.generateModel,
         }),
       })
@@ -128,7 +101,7 @@ export default function RunQA({ activity, code, modelSettings }: Props) {
       })
       setBusy(false)
     }
-  }, [input, busy, messages, activity, code, modelSettings])
+  }, [input, busy, messages, strategyId, modelSettings])
 
   const onKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
@@ -142,6 +115,9 @@ export default function RunQA({ activity, code, modelSettings }: Props) {
       {/* Header */}
       <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', color: 'var(--text-dim)', fontSize: 11, fontFamily: 'var(--font-mono)', letterSpacing: '0.1em', display: 'flex', alignItems: 'center', gap: 8 }}>
         RUN Q&amp;A
+        {strategyId && (
+          <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>— {strategyId}</span>
+        )}
         {messages.length > 0 && (
           <button onClick={() => setMessages([])} style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-muted)', background: 'transparent', border: 'none', cursor: 'pointer' }}>
             clear
@@ -151,11 +127,15 @@ export default function RunQA({ activity, code, modelSettings }: Props) {
 
       {/* Messages */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {messages.length === 0 && (
+        {!strategyId ? (
           <div style={{ color: 'var(--text-muted)', fontSize: 11, fontStyle: 'italic' }}>
-            Ask anything about this run — quotes received, signal values, why no fills, etc.
+            No active run — submit a strategy to enable run analysis.
           </div>
-        )}
+        ) : messages.length === 0 ? (
+          <div style={{ color: 'var(--text-muted)', fontSize: 11, fontStyle: 'italic' }}>
+            Ask anything about this run — fills received, signal values, why no orders, P&amp;L breakdown, etc.
+          </div>
+        ) : null}
         {messages.map((m, i) => (
           <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             <div style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', letterSpacing: '0.05em' }}>
@@ -183,9 +163,9 @@ export default function RunQA({ activity, code, modelSettings }: Props) {
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={onKeyDown}
-          placeholder="Ask about the run… (⌘↵ to send)"
+          placeholder={strategyId ? 'Ask about the run… (⌘↵ to send)' : 'No active run'}
           rows={2}
-          disabled={busy}
+          disabled={busy || !strategyId}
           style={{
             flex: 1, fontSize: 12, lineHeight: 1.5, resize: 'none',
             color: 'var(--text)', background: 'var(--surface)',
@@ -194,16 +174,15 @@ export default function RunQA({ activity, code, modelSettings }: Props) {
         />
         <button
           onClick={sendQuestion}
-          disabled={!input.trim() || busy}
+          disabled={!input.trim() || busy || !strategyId}
           style={{
             padding: '0 12px', borderRadius: 4, fontSize: 12, fontWeight: 600, border: 'none',
-            background: input.trim() && !busy ? 'var(--accent)' : 'var(--surface)',
-            color: input.trim() && !busy ? '#fff' : 'var(--text-muted)',
-            cursor: input.trim() && !busy ? 'pointer' : 'not-allowed',
-            alignSelf: 'stretch',
+            background: input.trim() && !busy && strategyId ? 'var(--accent)' : 'var(--surface)',
+            color: input.trim() && !busy && strategyId ? '#fff' : 'var(--text-muted)',
+            cursor: input.trim() && !busy && strategyId ? 'pointer' : 'default',
           }}
         >
-          {busy ? '…' : 'Ask'}
+          Ask
         </button>
       </div>
     </div>

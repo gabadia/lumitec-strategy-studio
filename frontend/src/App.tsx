@@ -7,6 +7,7 @@ import CodePanel from './components/CodePanel'
 import RunQA from './components/RunQA'
 import StatusStepper from './components/StatusStepper'
 import LoginGate from './components/LoginGate'
+import ClearRunsDialog from './components/ClearRunsDialog'
 import type { ActivityEntry, StrategyRawEvent, StudioEvent, WorkflowStep } from './types'
 import { toolToStep } from './types'
 import { clearTrader, getTrader, getTraderHeaders } from './auth'
@@ -199,7 +200,7 @@ const nextStrategyEventId = () => String(++strategyEventId)
 
 export default function App() {
   const {
-    isRunning, step, code, modelSettings,
+    isRunning, step, code, modelSettings, activeStrategyId,
     setRunning, setStep, addActivity, updateLastActivity, addStrategyEvent, clearStrategyEvents,
     setCode, setSavedCode, setLoadedStrategyName, setTools, setActiveStrategyId, setModelSettings, setPendingSubmission, reset,
   } = useStore()
@@ -554,6 +555,7 @@ export default function App() {
   }, [reset, setRunning, setStep, setCode, setActiveStrategyId, openStrategyEventSource, addActivity, updateLastActivity])
 
   const trader = getTrader()
+  const [showClearRuns, setShowClearRuns] = useState(false)
 
   return (
     <LoginGate>
@@ -567,6 +569,13 @@ export default function App() {
         <img src="/lumitecLargeLogo.jpeg" alt="Lumitec" style={{ height: 28, objectFit: 'contain' }} />
         <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>Strategy Studio</span>
         <div style={{ flex: 1 }} />
+        <button
+          onClick={() => setShowClearRuns(true)}
+          title="Manage run databases"
+          style={{ padding: '3px 10px', background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--text-dim)', fontSize: 11, cursor: 'pointer' }}
+        >
+          🗄 Runs
+        </button>
         <StatusStepper step={step} />
         {!isRunning && step !== 'idle' && (
           <button
@@ -629,10 +638,11 @@ export default function App() {
             ))}
           </div>
           {rightPanel === 'code' ? <CodePanel /> : (
-            <RunQA activity={useStore.getState().activity} code={code} modelSettings={modelSettings} />
+            <RunQA strategyId={activeStrategyId} modelSettings={modelSettings} />
           )}
         </div>
       </div>
+      {showClearRuns && <ClearRunsDialog onClose={() => setShowClearRuns(false)} />}
     </div>
     </LoginGate>
   )
