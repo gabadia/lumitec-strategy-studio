@@ -49,10 +49,16 @@ function extractKeyFields(raw: Record<string, unknown>): string {
     }
   }
 
-  const skip = new Set(['event_type', 'type', 'strategy_id', 'supervisor_id', 'timestamp', 'termination_type'])
+  const skip = new Set([
+    'event_type', 'type', 'strategy_id', 'supervisor_id', 'timestamp', 'termination_type',
+    // nanosecond timestamps & sequence numbers — noise in the feed
+    'ts_event', 'ts_started', 'ts_opened', 'ts_completed', 'seq', 'event_level',
+    // stop_reason is rendered separately with its own highlight
+    'stop_reason',
+  ])
   const entries = Object.entries(data)
     .filter(([k]) => !skip.has(k))
-    .slice(0, 6)
+    .slice(0, 8)
   if (!entries.length) return ''
   return entries.map(([k, v]) => {
     const val = typeof v === 'object' ? JSON.stringify(v) : String(v)
@@ -61,10 +67,18 @@ function extractKeyFields(raw: Record<string, unknown>): string {
   }).join('  |  ')
 }
 
+function extractStopReason(raw: Record<string, unknown>): string | null {
+  const data = (raw.data ?? raw) as Record<string, unknown>
+  const reason = data.stop_reason
+  if (reason == null || reason === '') return null
+  return String(reason)
+}
+
 function EventRow({ event }: { event: StrategyRawEvent }) {
   const colors = eventColor(event.eventType)
   const isTerminal = Boolean(event.terminationType)
   const fields = extractKeyFields(event.raw)
+  const stopReason = extractStopReason(event.raw)
 
   return (
     <div style={{
@@ -94,6 +108,15 @@ function EventRow({ event }: { event: StrategyRawEvent }) {
           </span>
         )}
       </div>
+      {stopReason && (
+        <div style={{
+          marginTop: 3, fontSize: 10, fontFamily: 'var(--font-mono)', lineHeight: 1.4,
+          color: '#ff6b6b', background: '#2a0a0a', border: '1px solid #5a1a1a',
+          borderRadius: 3, padding: '2px 6px', wordBreak: 'break-all',
+        }}>
+          stop_reason: {stopReason}
+        </div>
+      )}
       {fields && (
         <div style={{
           marginTop: 2, fontSize: 10, color: 'var(--text-dim)',
