@@ -5,6 +5,7 @@ import ActivityFeed from './components/ActivityFeed'
 import StrategyEventsFeed from './components/StrategyEventsFeed'
 import CodePanel from './components/CodePanel'
 import RunQA from './components/RunQA'
+import StrategyLogs from './components/StrategyLogs'
 import StatusStepper from './components/StatusStepper'
 import LoginGate from './components/LoginGate'
 import ClearRunsDialog from './components/ClearRunsDialog'
@@ -50,6 +51,7 @@ interface StudioState {
   addActivity: (e: ActivityEntry) => void
   updateLastActivity: (id: string, patch: Partial<ActivityEntry>) => void
   addStrategyEvent: (e: StrategyRawEvent) => void
+  addStrategyEvents: (batch: StrategyRawEvent[]) => void
   clearStrategyEvents: () => void
   setCode: (c: string) => void
   setSavedCode: (c: string) => void
@@ -60,6 +62,8 @@ interface StudioState {
   setPendingSubmission: (v: StudioState['pendingSubmission']) => void
   reset: () => void
 }
+
+const MAX_LIVE_EVENTS = 300
 
 export const useStore = create<StudioState>((set) => ({
   isRunning: false,
@@ -81,7 +85,14 @@ export const useStore = create<StudioState>((set) => ({
     set((s) => ({
       activity: s.activity.map((e) => (e.id === id ? { ...e, ...patch } : e)),
     })),
-  addStrategyEvent: (e) => set((s) => ({ strategyEvents: [...s.strategyEvents, e] })),
+  addStrategyEvent: (e) => set((s) => {
+    const next = [...s.strategyEvents, e]
+    return { strategyEvents: next.length > MAX_LIVE_EVENTS ? next.slice(-MAX_LIVE_EVENTS) : next }
+  }),
+  addStrategyEvents: (batch) => set((s) => {
+    const next = [...s.strategyEvents, ...batch]
+    return { strategyEvents: next.length > MAX_LIVE_EVENTS ? next.slice(-MAX_LIVE_EVENTS) : next }
+  }),
   clearStrategyEvents: () => set({ strategyEvents: [] }),
   setCode: (c) => set({ code: c }),
   setSavedCode: (c) => set({ savedCode: c }),
@@ -206,7 +217,7 @@ export default function App() {
   } = useStore()
   const abortRef = useRef<AbortController | null>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
-  const [rightPanel, setRightPanel] = useState<'code' | 'qa'>('code')
+  const [rightPanel, setRightPanel] = useState<'code' | 'qa' | 'logs'>('code')
   const [leftPanel, setLeftPanel] = useState<'activity' | 'events'>('activity')
 
   const liveTextIdRef = useRef<string | null>(null)
@@ -223,6 +234,26 @@ export default function App() {
     const es = new EventSource(`/api/strategies/${strategyId}/events`)
     eventSourceRef.current = es
 
+    // RAF batching: buffer incoming events and flush into the store at most once per frame
+    const eventBuffer: import('./types').StrategyRawEvent[] = []
+    let rafPending = false
+    let terminalPending: { step: 'done'; running: false } | null = null
+
+    const flushBuffer = () => {
+      rafPending = false
+      if (eventBuffer.length > 0) {
+        const batch = eventBuffer.splice(0)
+        useStore.getState().addStrategyEvents(batch)
+      }
+      if (terminalPending) {
+        setStep(terminalPending.step)
+        setRunning(terminalPending.running)
+        terminalPending = null
+        es.close()
+        eventSourceRef.current = null
+      }
+    }
+
     es.onmessage = (ev) => {
       try {
         const raw = JSON.parse(ev.data) as Record<string, unknown>
@@ -233,7 +264,7 @@ export default function App() {
           return
         }
         const terminationType = raw.termination_type as string | undefined
-        addStrategyEvent({
+        eventBuffer.push({
           id: nextStrategyEventId(),
           timestamp: Date.now(),
           eventType,
@@ -242,20 +273,22 @@ export default function App() {
           terminationType,
         })
         if (terminationType) {
-          // Terminal event received — strategy has stopped
-          setStep('done')
-          setRunning(false)
-          es.close()
-          eventSourceRef.current = null
+          // Mark terminal — will be acted on in the next flush
+          terminalPending = { step: 'done', running: false }
+        }
+        if (!rafPending) {
+          rafPending = true
+          requestAnimationFrame(flushBuffer)
         }
       } catch { /* ignore malformed */ }
     }
 
-    es.onerror = () => {
-      es.close()
-      eventSourceRef.current = null
-    }
-  }, [addStrategyEvent, clearStrategyEvents, setStep, setRunning])
+    // Do NOT call es.close() here — that would cancel the browser's built-in
+    // auto-reconnect. Transient drops (network hiccup, server restart) recover
+    // automatically. The stream_end / flushBuffer paths still close explicitly
+    // when a terminal event or clean shutdown is received.
+    es.onerror = () => { /* let browser reconnect */ }
+  }, [clearStrategyEvents, setStep, setRunning])
 
   // Load a strategy into the editor without running
   const handleLoad = useCallback(async (strategyName: string) => {
@@ -626,19 +659,21 @@ export default function App() {
 
         <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-            {(['code', 'qa'] as const).map(panel => (
+            {(['code', 'qa', 'logs'] as const).map(panel => (
               <button key={panel} onClick={() => setRightPanel(panel)} style={{
                 padding: '8px 14px', fontSize: 11, fontFamily: 'var(--font-mono)', letterSpacing: '0.1em',
                 fontWeight: 600, border: 'none', borderBottom: rightPanel === panel ? '2px solid var(--accent)' : '2px solid transparent',
                 background: 'transparent', color: rightPanel === panel ? 'var(--accent)' : 'var(--text-dim)',
                 cursor: 'pointer',
               }}>
-                {panel === 'code' ? 'STRATEGY CODE' : 'RUN Q&A'}
+                {panel === 'code' ? 'STRATEGY CODE' : panel === 'qa' ? 'RUN Q&A' : 'LOGS'}
               </button>
             ))}
           </div>
-          {rightPanel === 'code' ? <CodePanel /> : (
+          {rightPanel === 'code' ? <CodePanel /> : rightPanel === 'qa' ? (
             <RunQA strategyId={activeStrategyId} modelSettings={modelSettings} />
+          ) : (
+            <StrategyLogs strategyId={activeStrategyId} />
           )}
         </div>
       </div>

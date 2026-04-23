@@ -421,7 +421,7 @@ async def _stream_with_query_tool(
         }
         messages: list[dict] = [{"role": "user", "content": user}]
 
-        for _ in range(5):  # safety cap on tool-call rounds
+        for _round in range(20):  # safety cap on tool-call rounds
             resp = await _anthropic.messages.create(
                 model=model,
                 max_tokens=4096,
@@ -467,6 +467,8 @@ async def _stream_with_query_tool(
                     "content": json.dumps(rows),
                 })
             messages.append({"role": "user", "content": tool_results})
+        else:
+            yield "\n\n*[Query budget exhausted — analysis may be incomplete.]*"
 
     else:  # OpenAI
         if not _openai:
@@ -486,7 +488,7 @@ async def _stream_with_query_tool(
             {"role": "user", "content": user},
         ]
 
-        for _ in range(5):
+        for _round in range(20):
             resp_oa = await _openai.chat.completions.create(
                 model=model,
                 max_tokens=4096,
@@ -527,6 +529,8 @@ async def _stream_with_query_tool(
                     "tool_call_id": tc.id,
                     "content": json.dumps(rows),
                 })
+        else:
+            yield "\n\n*[Query budget exhausted — analysis may be incomplete.]*"
 
 
 # ---------------------------------------------------------------------------
@@ -690,6 +694,26 @@ async def api_update_params(strategy_id: str, request: Request):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/strategies/{strategy_id}/logs")
+async def api_strategy_logs(strategy_id: str, since: str = "1h", n: int = 200):
+    """Proxy strategy container logs from the Orchestrator supervisor API."""
+    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{SUPERVISOR_ID}/strategies/{strategy_id}/logs"
+    params = {"since": since, "n": min(n, 2000)}
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params, timeout=30.0)
+        for code in (404, 500, 502, 504):
+            if response.status_code == code:
+                raise HTTPException(status_code=code, detail=response.text)
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        return response.json()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/strategies/{strategy_id}/status")
 async def api_get_status(strategy_id: str):
     """Get strategy status from Orchestrator."""
@@ -739,6 +763,24 @@ async def api_strategy_events(strategy_id: str):
                 "value TEXT NOT NULL)"
             )
             await db.commit()
+
+            # ── Replay stored events first ────────────────────────────────────
+            # If the browser reconnects (or opens late), SQLite already has
+            # everything the relay previously received.  Replay it so the
+            # frontend never misses events — including terminal ones.
+            already_terminal = False
+            async with db.execute("SELECT raw FROM events ORDER BY id") as cur:
+                async for (raw_json,) in cur:
+                    yield f"data: {raw_json}\n\n"
+                    try:
+                        ev = json.loads(raw_json)
+                        if "termination_type" in ev:
+                            already_terminal = True
+                    except Exception:
+                        pass
+            if already_terminal:
+                # Strategy already finished — no need to connect to live gateway.
+                return
 
             async with httpx.AsyncClient() as client:
                 async with client.stream(
@@ -978,7 +1020,11 @@ async def analyze_execution(body: AnalyzeExecutionRequest):
         "specific data to answer accurately — fills, timestamps, signal values, error details, order sequences, etc.\n"
         "The events table has: id, ts (ms epoch), event_type (TEXT), raw (JSON TEXT).\n"
         "Use json_extract(raw, '$.field') to reach into the JSON payload.\n"
-        "Always prefer querying over guessing. Answer concisely and precisely.\n\n"
+        "Always prefer querying over guessing. Answer concisely and precisely.\n"
+        "IMPORTANT: You have a limited number of query rounds. "
+        "Before writing your answer, gather ALL data you need in as FEW queries as possible — "
+        "combine multiple metrics into a single SQL statement using GROUP BY, COUNT, AVG, MIN, MAX, etc. "
+        "Do not query one metric per round. Once you have enough data, write the full answer in one shot.\n\n"
         "## Run Orientation\n" + orientation
     )
 
