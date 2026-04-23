@@ -64,7 +64,7 @@ export interface StrategyRawEvent {
   eventType: string                   // event_type from supervisor
   strategyId?: string
   raw: Record<string, unknown>        // full raw event object from gateway
-  terminationType?: string            // enriched by backend for terminal events
+  terminationType?: 'COMPLETED' | 'EXPIRED' | 'STOPPED' | 'FAILED'  // enriched by backend for terminal events
 }
 
 // Activity feed entry

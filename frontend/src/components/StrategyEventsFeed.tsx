@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { memo, useEffect, useRef } from 'react'
 import { useStore } from '../App'
 import type { StrategyRawEvent } from '../types'
 
@@ -74,7 +74,7 @@ function extractStopReason(raw: Record<string, unknown>): string | null {
   return String(reason)
 }
 
-function EventRow({ event }: { event: StrategyRawEvent }) {
+const EventRow = memo(function EventRow({ event }: { event: StrategyRawEvent }) {
   const colors = eventColor(event.eventType)
   const isTerminal = Boolean(event.terminationType)
   const fields = extractKeyFields(event.raw)
@@ -98,15 +98,24 @@ function EventRow({ event }: { event: StrategyRawEvent }) {
         }}>
           {event.eventType}
         </span>
-        {event.terminationType && (
-          <span style={{
-            fontSize: 10, fontFamily: 'var(--font-mono)', fontWeight: 700,
-            padding: '1px 5px', borderRadius: 3,
-            background: '#3a2a00', color: '#ffd54f', border: '1px solid #5a4a00',
-          }}>
-            {event.terminationType}
-          </span>
-        )}
+        {event.terminationType && (() => {
+          const tbg: Record<string, { bg: string; fg: string; border: string }> = {
+            COMPLETED: { bg: '#0a2a0a', fg: '#81c784', border: '#1a4a1a' },
+            EXPIRED:   { bg: '#3a2a00', fg: '#ffd54f', border: '#5a4a00' },
+            STOPPED:   { bg: '#0a1a3a', fg: '#90caf9', border: '#1a2a5a' },
+            FAILED:    { bg: '#2a0a0a', fg: '#ff6b6b', border: '#5a1a1a' },
+          }
+          const tc = tbg[event.terminationType!] ?? tbg.FAILED
+          return (
+            <span style={{
+              fontSize: 10, fontFamily: 'var(--font-mono)', fontWeight: 700,
+              padding: '1px 5px', borderRadius: 3,
+              background: tc.bg, color: tc.fg, border: `1px solid ${tc.border}`,
+            }}>
+              {event.terminationType}
+            </span>
+          )
+        })()}
       </div>
       {stopReason && (
         <div style={{
@@ -127,14 +136,18 @@ function EventRow({ event }: { event: StrategyRawEvent }) {
       )}
     </div>
   )
-}
+})
 
 export default function StrategyEventsFeed() {
   const strategyEvents = useStore((s) => s.strategyEvents)
-  const bottomRef = useRef<HTMLDivElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const el = containerRef.current
+    if (!el) return
+    // Only auto-scroll if already near the bottom (user hasn't scrolled up)
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    if (atBottom) el.scrollTop = el.scrollHeight
   }, [strategyEvents.length])
 
   if (!strategyEvents.length) {
@@ -146,11 +159,10 @@ export default function StrategyEventsFeed() {
   }
 
   return (
-    <div style={{ flex: 1, overflowY: 'auto' }}>
+    <div ref={containerRef} style={{ flex: 1, overflowY: 'auto' }}>
       {strategyEvents.map((event) => (
         <EventRow key={event.id} event={event} />
       ))}
-      <div ref={bottomRef} />
     </div>
   )
 }

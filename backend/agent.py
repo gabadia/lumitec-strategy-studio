@@ -10,6 +10,7 @@ Requires OPENAI_API_KEY in .env.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import os
@@ -75,6 +76,9 @@ RETRY_BASE_DELAY        = 60
 MAX_VALIDATION_ATTEMPTS = 3
 MAX_SIMULATION_POLLS    = 60  # kept for reference, no longer used in agent
 
+# ─── Tick handler defaults ────────────────────────────────────────────────────
+TICK_THROTTLE_INTERVAL_S = float(os.getenv("TICK_THROTTLE_INTERVAL_S", "1.0"))
+
 # ─── Clients ─────────────────────────────────────────────────────────────────
 _anthropic = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -99,6 +103,8 @@ def _load_generation_system() -> str:
     """Phase 1 — Generation: structural rules + generation instructions."""
     parts = []
     structure = _read_file(STRATEGY_STRUCTURE_PROMPT_PATH)
+    if structure:
+        structure = structure.replace("{TICK_THROTTLE_INTERVAL_S}", str(TICK_THROTTLE_INTERVAL_S))
     parts.append(structure if structure else "You are a Lumitec strategy developer.")
     gen_prompt = _read_file(STRATEGY_GENERATION_PROMPT_PATH)
     if gen_prompt:
@@ -477,6 +483,37 @@ async def _phase_openai_validate(
                 structural_errors.append("Missing `class Config(LumitecStrategyConfig)` — supervisor cannot load strategy without it")
             if 'from_config' not in code:
                 structural_errors.append("Missing `from_config` classmethod in ConfigParams")
+            # AST-based: tick handlers calling observe/decide/act must have a timestamp throttle
+            try:
+                tree = ast.parse(code)
+                _tick_handlers = {
+                    'on_quote_tick', 'on_trade_tick', 'on_order_book_delta',
+                    'on_symbol_quote_tick', 'on_symbol_trade_tick',
+                }
+                _observe_act = {'observe', 'decide', 'act'}
+                _throttle_names = {'_last_tick_ts', '_last_tick', 'tick_throttle_interval', 'monotonic'}
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.FunctionDef) and node.name in _tick_handlers:
+                        has_signal_call = any(
+                            isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                            and n.func.attr in _observe_act
+                            for n in ast.walk(node)
+                        )
+                        if has_signal_call:
+                            has_throttle = any(
+                                (isinstance(n, ast.Name) and n.id in _throttle_names) or
+                                (isinstance(n, ast.Attribute) and n.attr in _throttle_names)
+                                for n in ast.walk(node)
+                            )
+                            if not has_throttle:
+                                structural_errors.append(
+                                    f"Tick handler `{node.name}` calls observe/decide/act without a "
+                                    f"timestamp throttle guard — add "
+                                    f"`if time.monotonic() - self._last_tick_ts < self.params.tick_throttle_interval: return` "
+                                    f"after the isPaused() check and initialise `self._last_tick_ts = 0.0` in `__init__`"
+                                )
+            except SyntaxError:
+                pass  # syntax errors are caught by the MCP validator
             if structural_errors:
                 content = "Structural errors:\n" + "\n".join(f"- {e}" for e in structural_errors)
                 yield {
@@ -816,20 +853,25 @@ async def _phase_submit(
 
 _TERMINAL_EVENTS = {
     "strategy.stopped":   None,       # termination_type resolved via stop_reason
+    "strategy.expired":   "EXPIRED",  # deadline hit before objective completed
     "strategy.failed":    "FAILED",
     "strategy.completed": "COMPLETED",
 }
 
 # Maps stop_reason field (from FORCED_STOP event) to enriched termination_type.
+# strategy.stopped fires for USER/DENIED/UNKNOWN; strategy.expired fires for TIME/SESSION_END.
 # MANUAL is the retired legacy value — treat same as COMPLETED.
 _STOP_REASON_TO_TYPE = {
-    "COMPLETED": "COMPLETED",
-    "USER":      "STOPPED_BY_USER",
-    "RISK":      "STOPPED_RISK",
-    "SYSTEM":    "STOPPED_SYSTEM",
-    "TIME":      "STOPPED_SESSION_END",
-    "ERROR":     "FAILED",
-    "MANUAL":    "COMPLETED",   # retired — legacy events only
+    "COMPLETED":   "COMPLETED",
+    "RISK":        "COMPLETED",
+    "SYSTEM":      "COMPLETED",
+    "TIME":        "EXPIRED",
+    "SESSION_END": "EXPIRED",
+    "USER":        "STOPPED",
+    "DENIED":      "STOPPED",
+    "UNKNOWN":     "STOPPED",
+    "ERROR":       "FAILED",
+    "MANUAL":      "COMPLETED",   # retired — legacy events only
 }
 
 
