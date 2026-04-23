@@ -31,6 +31,7 @@ Your sole job is to fix validation errors. Do not redesign, refactor, or improve
 ## Required Imports (use these exactly)
 
 ```python
+import time
 from dataclasses import dataclass, replace, fields as dc_fields
 from threading import RLock
 from nautilus_trader.model.enums import OrderSide, TimeInForce, BarAggregation, PriceType
@@ -69,6 +70,7 @@ All 16 patterns must be present. If the error references one of these, add the m
 | 18 | `self.observe()` in market data handlers | Add logging signal values — e.g. `self.observe("bar", context={"price": float(bar.close)})` |
 | 19 | `self.decide()` before entry/exit | Add before every order decision — e.g. `self.decide("entry signal", context={"reason": "..."})` |
 | 20 | `self.act()` after order actions | Add after every submit/cancel/stop — e.g. `self.act("submitted BUY", context={"qty": qty})` |
+| 21 | Tick throttle guard in `on_quote_tick`/`on_trade_tick`/`on_symbol_quote_tick`/`on_symbol_trade_tick` | Add `if time.monotonic() - self._last_tick_ts < self.params.tick_throttle_interval: return` after `isPaused()` check; add `self._last_tick_ts: float = 0.0` in `__init__`; add `tick_throttle_interval: float = 1.0` to `ConfigParams` |
 
 ---
 

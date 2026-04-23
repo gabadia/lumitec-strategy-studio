@@ -1,5 +1,6 @@
 ## Base class
 ```python
+import time
 from dataclasses import dataclass, replace, fields as dc_fields
 from threading import RLock
 from lumitec.strategy.base import LumitecBaseStrategy
@@ -401,9 +402,65 @@ self.forced_stop("End time reached", "TIME")
 
 ---
 
+## Tick handler rate control
+
+Tick handlers (`on_symbol_quote_tick`, `on_symbol_trade_tick`) fire on every market event the exchange streams — potentially thousands per second. Calling `observe()`, `decide()`, or `act()` on every tick floods the reasoning panel and wastes compute.
+
+**All tick handlers that call observe/decide/act MUST contain a timestamp throttle guard.**
+
+### Required: timestamp throttle
+
+Add to `ConfigParams`:
+```python
+tick_throttle_interval: float = {TICK_THROTTLE_INTERVAL_S}  # seconds between observe/decide/act calls
+```
+
+Add to `__init__`:
+```python
+self._last_tick_ts: float = 0.0
+```
+
+Guard at the top of every tick handler, immediately after the `isPaused()` check:
+```python
+def on_symbol_quote_tick(self, symbol: str, tick) -> None:
+    if self.isPaused():
+        return
+    now = time.monotonic()
+    if now - self._last_tick_ts < self.params.tick_throttle_interval:
+        return
+    self._last_tick_ts = now
+    # ... signal logic, observe / decide / act
+```
+
+`import time` is a standard library module — add it alongside your other imports.
+
+### Optional: signal deduplication
+
+If the handler computes a stable derived scalar (e.g. mid-price), also skip repeated values:
+```python
+mid = (tick.ask_price + tick.bid_price) / 2
+if abs(mid - self._last_mid) < 1e-8:
+    return
+self._last_mid = mid
+```
+Initialise `self._last_mid: float = 0.0` in `__init__`.
+
+### Optional: state-transition guard
+
+If the strategy tracks a discrete regime or mode, emit only on change:
+```python
+new_regime = "bull" if signal > 0 else "bear"
+if new_regime == self._regime:
+    return
+self._regime = new_regime
+self.decide("Regime changed", context={"regime": new_regime})
+```
+
+---
+
 ## Validation checklist
 
-Before publishing, all 17 of these must be present in your file:
+Before publishing, all 18 of these must be present in your file:
 
 | # | Pattern |
 |---|------|
@@ -424,6 +481,7 @@ Before publishing, all 17 of these must be present in your file:
 | 15 | `isPaused()` guard at top of every market data handler |
 | 16 | `on_pause()` / `on_resume()` hooks (not `pause()`/`resume()`) |
 | 17 | `self.params` and `self._param_lock = RLock()` initialised in `__init__`, not `on_start` |
+| 18 | `tick_throttle_interval` in `ConfigParams`; `self._last_tick_ts = 0.0` in `__init__`; timestamp throttle guard in every tick handler that calls observe/decide/act |
 
 Forbidden imports (publish will be rejected if found):
 `subprocess`, `socket`, `requests`, `os.system`, `urllib`
