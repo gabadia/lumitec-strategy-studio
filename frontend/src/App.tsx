@@ -397,19 +397,6 @@ export default function App() {
           // EventSource already opened on tool_call — don't reopen
           break
 
-        case 'sim_commentary':
-          addActivity({
-            id: nextId(),
-            type: 'sim_commentary',
-            timestamp: ts,
-            simCommentary: event.commentary,
-            simPosition: event.position,
-            simPnl: event.realized_pnl,
-            simViolations: event.violations,
-            turn: event.turn,
-          })
-          break
-
         case 'rate_limit_retry':
           addActivity({ id: nextId(), type: 'rate_limit_retry', timestamp: ts, content: event.message })
           break

@@ -166,41 +166,6 @@ function EntryRow({ entry }: { entry: ActivityEntry }) {
     )
   }
 
-  if (type === 'sim_commentary') {
-    const hasViolations = entry.simViolations && entry.simViolations.length > 0
-    const criticalViolations = entry.simViolations?.filter(v => v.severity === 'CRITICAL') ?? []
-    return (
-      <div style={{ padding: '5px 12px', borderBottom: '1px solid var(--border)', background: hasViolations ? '#0f1a0f' : 'transparent' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span style={{ color: 'var(--text-muted)', fontSize: 10 }}>{formatTime(entry.timestamp)}</span>
-          <span className="tag" style={{ background: '#0a2a2a', color: '#4ec9b0', border: '1px solid #1a4a4a' }}>~ AUDIT</span>
-          {entry.simPosition !== undefined && (
-            <span style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
-              pos {entry.simPosition}
-            </span>
-          )}
-          {entry.simPnl !== undefined && (
-            <span style={{
-              fontSize: 10,
-              fontFamily: 'var(--font-mono)',
-              color: entry.simPnl >= 0 ? 'var(--green)' : 'var(--red)',
-            }}>
-              P&L ${entry.simPnl.toFixed(2)}
-            </span>
-          )}
-        </div>
-        <div style={{ marginTop: 2, fontSize: 12, color: '#4ec9b0', lineHeight: 1.5 }}>
-          {entry.simCommentary}
-        </div>
-        {criticalViolations.map((v, i) => (
-          <div key={i} style={{ marginTop: 2, fontSize: 11, color: 'var(--red)', fontFamily: 'var(--font-mono)' }}>
-            ⚠ {v.rule}: {v.detail}
-          </div>
-        ))}
-      </div>
-    )
-  }
-
   if (type === 'rate_limit_retry') {
     return (
       <div style={{ padding: '5px 12px', borderBottom: '1px solid var(--border)', background: '#1a1500' }}>
