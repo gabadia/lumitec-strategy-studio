@@ -7,6 +7,12 @@ interface Message {
   streaming?: boolean
 }
 
+interface AnalysisPrompt {
+  id: string
+  label: string
+  question: string
+}
+
 interface Props {
   strategyId: string | null
   modelSettings: { generateModel: string }
@@ -16,7 +22,16 @@ export default function RunQA({ strategyId, modelSettings }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  const [analysisPrompts, setAnalysisPrompts] = useState<AnalysisPrompt[]>([])
   const bottomRef = useRef<HTMLDivElement>(null)
+
+  // Load curated analysis prompts once on mount
+  useEffect(() => {
+    fetch('/api/analysis-prompts', { headers: getTraderHeaders() })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data?.prompts) setAnalysisPrompts(data.prompts) })
+      .catch(() => {})
+  }, [])
 
   // Clear conversation when the active strategy changes
   useEffect(() => {
@@ -77,6 +92,15 @@ export default function RunQA({ strategyId, modelSettings }: Props) {
                 }
                 return next
               })
+            } else if (evt.type === 'error') {
+              setMessages(prev => {
+                const next = [...prev]
+                const last = next[next.length - 1]
+                if (last?.role === 'assistant') {
+                  next[next.length - 1] = { ...last, content: `⚠ ${evt.message}` }
+                }
+                return next
+              })
             }
           } catch { /* ignore */ }
         }
@@ -110,6 +134,75 @@ export default function RunQA({ strategyId, modelSettings }: Props) {
     }
   }, [sendQuestion])
 
+  const firePreset = useCallback((question: string) => {
+    if (busy || !strategyId || !question) return
+    setInput(question)
+    // Defer one tick so setInput flushes before sendQuestion reads it
+    setTimeout(() => {
+      setInput('')
+      setBusy(true)
+      const history = messages.map(m => ({ role: m.role, content: m.content }))
+      setMessages(prev => [
+        ...prev,
+        { role: 'user', content: question },
+        { role: 'assistant', content: '', streaming: true },
+      ])
+      fetch('/api/analyze-execution', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getTraderHeaders() },
+        body: JSON.stringify({ strategy_id: strategyId, question, history, model: modelSettings.generateModel }),
+      }).then(async response => {
+        if (!response.body) throw new Error('No response body')
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() ?? ''
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue
+            try {
+              const evt = JSON.parse(line.slice(6))
+              if (evt.type === 'text_delta') {
+                setMessages(prev => {
+                  const next = [...prev]
+                  const last = next[next.length - 1]
+                  if (last?.role === 'assistant') next[next.length - 1] = { ...last, content: last.content + evt.delta }
+                  return next
+                })
+              } else if (evt.type === 'error') {
+                setMessages(prev => {
+                  const next = [...prev]
+                  const last = next[next.length - 1]
+                  if (last?.role === 'assistant') next[next.length - 1] = { ...last, content: `⚠ ${evt.message}` }
+                  return next
+                })
+              }
+            } catch { /* ignore */ }
+          }
+        }
+      }).catch(err => {
+        setMessages(prev => {
+          const next = [...prev]
+          const last = next[next.length - 1]
+          if (last?.role === 'assistant') next[next.length - 1] = { ...last, content: `Error: ${err}` }
+          return next
+        })
+      }).finally(() => {
+        setMessages(prev => {
+          const next = [...prev]
+          const last = next[next.length - 1]
+          if (last?.role === 'assistant') next[next.length - 1] = { ...last, streaming: false }
+          return next
+        })
+        setBusy(false)
+      })
+    }, 0)
+  }, [busy, strategyId, messages, modelSettings])
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
       {/* Header */}
@@ -124,6 +217,28 @@ export default function RunQA({ strategyId, modelSettings }: Props) {
           </button>
         )}
       </div>
+
+      {/* Preset analysis buttons */}
+      {strategyId && analysisPrompts.length > 0 && (
+        <div style={{ padding: '6px 10px', borderBottom: '1px solid var(--border)', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {analysisPrompts.map(p => (
+            <button
+              key={p.id}
+              onClick={() => firePreset(p.question)}
+              disabled={busy}
+              style={{
+                fontSize: 10, fontFamily: 'var(--font-mono)', letterSpacing: '0.05em',
+                padding: '3px 8px', borderRadius: 3, border: '1px solid var(--border)',
+                background: 'var(--surface)', color: busy ? 'var(--text-muted)' : 'var(--text-dim)',
+                cursor: busy ? 'default' : 'pointer',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Messages */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 10 }}>

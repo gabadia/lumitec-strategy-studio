@@ -12,7 +12,6 @@ export type StudioEventType =
   | 'turn_complete'
   | 'rate_limit_retry'
   | 'strategy_submitted'
-  | 'sim_commentary'
   | 'params_ready'
   | 'done'
   | 'stream_end'
@@ -29,16 +28,6 @@ export interface ToolErrorEvent { type: 'tool_error'; id: string; name: string; 
 export interface TurnCompleteEvent { type: 'turn_complete'; turn: number; stop_reason: string }
 export interface RateLimitRetryEvent { type: 'rate_limit_retry'; attempt: number; retry_in: number; message: string }
 export interface StrategySubmittedEvent { type: 'strategy_submitted'; strategy_id: string }
-export interface SimCommentaryEvent {
-  type: 'sim_commentary'
-  commentary: string
-  position?: number
-  realized_pnl?: number
-  violations?: Array<{ rule: string; detail: string; severity: string }>
-  terminated?: boolean
-  termination_reason?: string | null
-  turn: number
-}
 export interface ParamsReadyEvent {
   type: 'params_ready'
   code: string
@@ -54,7 +43,7 @@ export type StudioEvent =
   | ToolsReadyEvent | ThinkingEvent | TextDeltaEvent
   | ToolCallStartEvent | ToolCallEvent | ToolExecutingEvent
   | ToolResultEvent | ToolErrorEvent | TurnCompleteEvent
-  | RateLimitRetryEvent | StrategySubmittedEvent | SimCommentaryEvent
+  | RateLimitRetryEvent | StrategySubmittedEvent
   | ParamsReadyEvent | DoneEvent | StreamEndEvent | ErrorEvent
 
 // Raw supervisor event from SSE gateway (port 9001 → relayed via 8089)
@@ -82,10 +71,6 @@ export interface ActivityEntry {
   durationMs?: number
   turn?: number
   live?: boolean          // true while text is still streaming in
-  simCommentary?: string
-  simPosition?: number
-  simPnl?: number
-  simViolations?: Array<{ rule: string; detail: string; severity: string }>
 }
 
 export type WorkflowStep =
