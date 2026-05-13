@@ -92,12 +92,65 @@ The strategy must assume:
 
 ---
 
+## NAUTILUS PRICE TYPES — MANDATORY CAST
+
+All Nautilus price/quantity fields are `decimal.Decimal`, not `float`:
+- `tick.ask_price`, `tick.bid_price`
+- `tick.price` (trade ticks)
+- `bar.close`, `bar.open`, `bar.high`, `bar.low`
+- `event.last_px`, `event.avg_px`
+
+**Always cast to `float` before arithmetic with floats or `ConfigParams` fields:**
+```python
+# CORRECT
+mid = (float(tick.ask_price) + float(tick.bid_price)) / 2
+price = mid - self.params.offset          # float - float = OK
+
+# WRONG — raises TypeError at runtime
+mid = (tick.ask_price + tick.bid_price) / 2
+price = mid - self.params.offset          # Decimal - float = TypeError
+```
+
+`Price.from_str(str(price))` still works correctly with a Python `float` — the cast to string handles precision.
+
+---
+
+## MANDATORY CLASS DEFINITION ORDER
+
+This is a hard requirement. Violating it causes a `NameError` at supervisor load time.
+
+Always write classes in this exact order:
+
+```python
+# 1 — Config FIRST (always)
+class Config(LumitecStrategyConfig):
+    strategy_name: str = "MyStrategy"
+    file_name: str = "my_strategy.py"
+    # all configurable params go here too
+    param_a: int = 10
+
+# 2 — ConfigParams SECOND
+@dataclass(frozen=True)
+class ConfigParams:
+    param_a: int = 10
+    ...
+
+# 3 — Strategy class LAST
+class MyStrategy(LumitecBaseStrategy):
+    def __init__(self, config: Config):  # Config is now defined — no NameError
+        ...
+```
+
+NEVER place `Config` after the strategy class. The supervisor runs `exec(code)` linearly — there are no forward references.
+
+---
+
 ## STRATEGY REQUIREMENTS
 
 The implementation must:
 
 - Follow Lumitec strategy structure
-- Use Config + ConfigParams pattern
+- Use Config + ConfigParams pattern (in the correct order above)
 - Enforce risk limits before submitting orders
 - Use correct order submission APIs
 - Track position and orders explicitly

@@ -47,11 +47,11 @@ from lumitec.strategy.definitions import LegMode, StrategyMission, StrategyObjec
 
 ---
 
-## Validation Checklist (16 required patterns)
+## Validation Checklist (22 required patterns)
 
 | # | Pattern |
 |---|---|
-| 0 | `Config` class present as a **top-level class** (not nested), inheriting from `LumitecStrategyConfig`, with `strategy_name` and `file_name` fields |
+| 0 | `Config` class present as a **top-level class** (not nested), inheriting from `LumitecStrategyConfig`, with `strategy_name` and `file_name` fields. **`Config` MUST be the first class defined in the file — before `ConfigParams` and before the strategy class.** |
 | 1 | `@dataclass(frozen=True)` on ConfigParams |
 | 2 | `validate()` method in ConfigParams |
 | 3 | `merged()` method in ConfigParams |
@@ -72,6 +72,33 @@ from lumitec.strategy.definitions import LegMode, StrategyMission, StrategyObjec
 | 18 | `self.observe()` calls in every market data handler logging signal values |
 | 19 | `self.decide()` calls before every entry and exit decision |
 | 20 | `self.act()` calls after every order submission, cancellation, and forced_stop |
+| 22 | All arithmetic using `tick.ask_price`, `tick.bid_price`, `tick.price`, `bar.close`, `bar.open`, `bar.high`, `bar.low` MUST cast to `float` first — these are `decimal.Decimal` in Nautilus. Use `float(tick.ask_price)`. Never mix `Decimal` with `float` in `-`, `+`, `*`, `/` expressions. |
+| 21 | Tick throttle guard in `on_quote_tick`/`on_trade_tick`/`on_symbol_quote_tick`/`on_symbol_trade_tick` — `if time.monotonic() - self._last_tick_ts < self.params.tick_throttle_interval: return`; add `self._last_tick_ts: float = 0.0` in `__init__`; add `tick_throttle_interval: float = 1.0` to `ConfigParams` |
+
+> **Authoritative fix guide with minimal-fix examples**: see [`validation_loop.md`](validation_loop.md).
+
+---
+
+## Mandatory Class Definition Order
+
+Python evaluates class bodies and function annotations at `exec()` time, so forward references to not-yet-defined classes
+cause a `NameError` in the supervisor (`strategy_loader.py`).
+
+**The file MUST declare classes in this order, with no exceptions:**
+
+```
+1. imports
+2. class Config(LumitecStrategyConfig):          ← MUST BE FIRST
+3. @dataclass(frozen=True)
+   class ConfigParams:                          ← MUST BE SECOND
+4. class MyStrategy(LumitecBaseStrategy):       ← MUST BE LAST
+```
+
+If `Config` is placed anywhere after the strategy class, the supervisor will raise:
+```
+NameError: name 'Config' is not defined
+```
+because the strategy class body contains `def __init__(self, config: Config)` which Python evaluates at class-definition time.
 
 ---
 
