@@ -1,16 +1,16 @@
 """
 Lumitec Strategy Studio — Multi-model agentic workflow.
 
-Phase 1  OpenAI GPT-4o       — strategy generation (text only, no tool calls)
-Phase 2  OpenAI GPT-4o-mini  — validation fix loop (stateless per iteration)
-Phase 3  Backend direct      — submit_strategy MCP call
-Phase 4  OpenAI GPT-4o-mini  — simulation monitor (stateful audit)
+Phase 1  — strategy generation  (configurable model, text-only)
+Phase 2  — validation fix loop  (configurable model, stateless per iteration)
+Phase 3  — submit to Orchestrator REST API (after frontend review + resubmit validation)
+
+Monitoring is handled via SSE relay in main.py (no agent involvement).
 
 Requires OPENAI_API_KEY in .env.
 """
 from __future__ import annotations
 
-import ast
 import asyncio
 import json
 import os
@@ -41,7 +41,6 @@ SUPERVISOR_ID     = os.getenv("SUPERVISOR_ID", "NUAM-DEV")
 _PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 STRATEGY_STRUCTURE_PROMPT_PATH   = os.getenv("STRATEGY_STRUCTURE_PROMPT_PATH",   os.path.join(_PROMPTS_DIR, "strategy_structure.md"))
 STRATEGY_GENERATION_PROMPT_PATH  = os.getenv("STRATEGY_GENERATION_PROMPT_PATH",  os.path.join(_PROMPTS_DIR, "strategy_generation.md"))
-AGENT_EXECUTION_PROMPT_PATH      = os.getenv("AGENT_EXECUTION_PROMPT_PATH",      os.path.join(_PROMPTS_DIR, "agent_execution.md"))
 VALIDATION_LOOP_PROMPT_PATH      = os.getenv("VALIDATION_LOOP_PROMPT_PATH",      os.path.join(_PROMPTS_DIR, "validation_loop.md"))
 STRATEGY_TESTING_PROMPT_PATH     = os.getenv("STRATEGY_TESTING_PROMPT_PATH",     os.path.join(_PROMPTS_DIR, "strategy_testing.md"))
 STRATEGY_REASONING_PROMPT_PATH   = os.getenv("STRATEGY_REASONING_PROMPT_PATH",   os.path.join(_PROMPTS_DIR, "strategy_reasoning.md"))
@@ -76,9 +75,6 @@ RETRY_BASE_DELAY        = 60
 MAX_VALIDATION_ATTEMPTS = 3
 MAX_SIMULATION_POLLS    = 60  # kept for reference, no longer used in agent
 
-# ─── Tick handler defaults ────────────────────────────────────────────────────
-TICK_THROTTLE_INTERVAL_S = float(os.getenv("TICK_THROTTLE_INTERVAL_S", "1.0"))
-
 # ─── Clients ─────────────────────────────────────────────────────────────────
 _anthropic = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -103,18 +99,11 @@ def _load_generation_system() -> str:
     """Phase 1 — Generation: structural rules + generation instructions."""
     parts = []
     structure = _read_file(STRATEGY_STRUCTURE_PROMPT_PATH)
-    if structure:
-        structure = structure.replace("{TICK_THROTTLE_INTERVAL_S}", str(TICK_THROTTLE_INTERVAL_S))
     parts.append(structure if structure else "You are a Lumitec strategy developer.")
     gen_prompt = _read_file(STRATEGY_GENERATION_PROMPT_PATH)
     if gen_prompt:
         parts.append(gen_prompt)
     return "\n\n---\n\n".join(parts)
-
-
-def _load_execution_system() -> str:
-    """Phase 3 — Execution: agent lifecycle and execution rules."""
-    return _read_file(AGENT_EXECUTION_PROMPT_PATH, "")
 
 
 def _load_fixing_system() -> str:
@@ -483,37 +472,6 @@ async def _phase_openai_validate(
                 structural_errors.append("Missing `class Config(LumitecStrategyConfig)` — supervisor cannot load strategy without it")
             if 'from_config' not in code:
                 structural_errors.append("Missing `from_config` classmethod in ConfigParams")
-            # AST-based: tick handlers calling observe/decide/act must have a timestamp throttle
-            try:
-                tree = ast.parse(code)
-                _tick_handlers = {
-                    'on_quote_tick', 'on_trade_tick', 'on_order_book_delta',
-                    'on_symbol_quote_tick', 'on_symbol_trade_tick',
-                }
-                _observe_act = {'observe', 'decide', 'act'}
-                _throttle_names = {'_last_tick_ts', '_last_tick', 'tick_throttle_interval', 'monotonic'}
-                for node in ast.walk(tree):
-                    if isinstance(node, ast.FunctionDef) and node.name in _tick_handlers:
-                        has_signal_call = any(
-                            isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                            and n.func.attr in _observe_act
-                            for n in ast.walk(node)
-                        )
-                        if has_signal_call:
-                            has_throttle = any(
-                                (isinstance(n, ast.Name) and n.id in _throttle_names) or
-                                (isinstance(n, ast.Attribute) and n.attr in _throttle_names)
-                                for n in ast.walk(node)
-                            )
-                            if not has_throttle:
-                                structural_errors.append(
-                                    f"Tick handler `{node.name}` calls observe/decide/act without a "
-                                    f"timestamp throttle guard — add "
-                                    f"`if time.monotonic() - self._last_tick_ts < self.params.tick_throttle_interval: return` "
-                                    f"after the isPaused() check and initialise `self._last_tick_ts = 0.0` in `__init__`"
-                                )
-            except SyntaxError:
-                pass  # syntax errors are caught by the MCP validator
             if structural_errors:
                 content = "Structural errors:\n" + "\n".join(f"- {e}" for e in structural_errors)
                 yield {
@@ -853,25 +811,20 @@ async def _phase_submit(
 
 _TERMINAL_EVENTS = {
     "strategy.stopped":   None,       # termination_type resolved via stop_reason
-    "strategy.expired":   "EXPIRED",  # deadline hit before objective completed
     "strategy.failed":    "FAILED",
     "strategy.completed": "COMPLETED",
 }
 
 # Maps stop_reason field (from FORCED_STOP event) to enriched termination_type.
-# strategy.stopped fires for USER/DENIED/UNKNOWN; strategy.expired fires for TIME/SESSION_END.
 # MANUAL is the retired legacy value — treat same as COMPLETED.
 _STOP_REASON_TO_TYPE = {
-    "COMPLETED":   "COMPLETED",
-    "RISK":        "COMPLETED",
-    "SYSTEM":      "COMPLETED",
-    "TIME":        "EXPIRED",
-    "SESSION_END": "EXPIRED",
-    "USER":        "STOPPED",
-    "DENIED":      "STOPPED",
-    "UNKNOWN":     "STOPPED",
-    "ERROR":       "FAILED",
-    "MANUAL":      "COMPLETED",   # retired — legacy events only
+    "COMPLETED": "COMPLETED",
+    "USER":      "STOPPED_BY_USER",
+    "RISK":      "STOPPED_RISK",
+    "SYSTEM":    "STOPPED_SYSTEM",
+    "TIME":      "STOPPED_SESSION_END",
+    "ERROR":     "FAILED",
+    "MANUAL":    "COMPLETED",   # retired — legacy events only
 }
 
 
@@ -1041,9 +994,9 @@ async def run_resubmit_workflow(
     end_time: str | None = None,
 ) -> AsyncIterator[dict]:
     """
-    Skip Phase 1 (generation) and Phase 2 (validation).
-    Use the existing validated code with user-supplied legs and params.
-    Goes straight to submit via Orchestrator REST API.
+    Re-submit flow: runs validate_strategy via MCP first (blocks on failure),
+    then POSTs to Orchestrator REST API.
+    Skips Phase 1 (generation) — uses the code already in the editor.
     """
 
     ET = ZoneInfo("America/New_York")
@@ -1061,6 +1014,55 @@ async def run_resubmit_workflow(
     try:
         metadata = _extract_metadata(code)
         metadata["legs"] = legs  # user-supplied legs override extracted ones
+
+        # ── Pre-submit validation ─────────────────────────────────────────────
+        yield {"type": "text_delta", "delta": "**Validating before resubmit…**\n", "turn": 1}
+        val_blocked = False
+        _val_content: str | None = None
+        _val_failed = False
+        _val_duration_ms = 0
+        try:
+            async with sse_client(MCP_SERVER_URL) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    t0 = time.monotonic()
+                    result = await session.call_tool("validate_strategy", {"code": code})
+                    _val_duration_ms = int((time.monotonic() - t0) * 1000)
+                    _val_content = _content_to_str(result.content)
+                    _val_failed = (
+                        result.isError
+                        or '"all_passed": false' in _val_content
+                        or ('"all_passed"' not in _val_content and '"detail"' in _val_content and 'true' not in _val_content)
+                    )
+        except Exception as val_exc:
+            yield {
+                "type": "text_delta",
+                "delta": f"\n*Warning: validator unreachable ({val_exc}) — proceeding with structural checks only.*\n",
+                "turn": 1,
+            }
+
+        if _val_content is not None:
+            yield {
+                "type": "tool_result",
+                "id": "resubmit_val",
+                "name": "validate_strategy",
+                "content": _val_content[:2000],
+                "duration_ms": _val_duration_ms,
+                "turn": 1,
+                "failed": _val_failed,
+            }
+            if _val_failed:
+                yield {
+                    "type": "text_delta",
+                    "delta": f"\n**Resubmit blocked — validation failed:**\n```\n{_val_content[:1500]}\n```",
+                    "turn": 1,
+                }
+                val_blocked = True
+
+        if val_blocked:
+            yield {"type": "turn_complete", "turn": 1, "stop_reason": "end_turn"}
+            yield {"type": "done"}
+            return
 
         yield {"type": "text_delta", "delta": "**Resubmitting with updated legs and parameters…**\n", "turn": 1}
 

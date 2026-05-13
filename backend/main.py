@@ -90,6 +90,25 @@ RUNS_DIR = Path(
         str(Path(__file__).parent.parent / "data" / "runs"),
     )
 )
+PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+_ANALYSIS_PROMPTS: dict[str, dict] = {
+    "performance": {
+        "id": "performance",
+        "label": "Analyze Performance",
+        "file": "analysis_performance.md",
+    },
+    "latency": {
+        "id": "latency",
+        "label": "Analyze Latency",
+        "file": "analysis_latency.md",
+    },
+    "behavior": {
+        "id": "behavior",
+        "label": "Analyze Behavior",
+        "file": "analysis_behavior.md",
+    },
+}
 
 _ID_RE = re.compile(r'^[A-Za-z0-9_\-]{1,64}$')
 _NAME_RE = re.compile(r'^[A-Za-z0-9_]{1,128}$')
@@ -936,6 +955,20 @@ async def api_run_context(strategy_id: str):
 # ---------------------------------------------------------------------------
 # Run database management
 # ---------------------------------------------------------------------------
+
+@app.get("/analysis-prompts")
+async def get_analysis_prompts():
+    """Return the three curated post-run analysis prompts, loaded from disk."""
+    result = []
+    for meta in _ANALYSIS_PROMPTS.values():
+        path = PROMPTS_DIR / meta["file"]
+        try:
+            question = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            question = ""
+        result.append({"id": meta["id"], "label": meta["label"], "question": question})
+    return {"prompts": result}
+
 
 @app.get("/run-databases")
 async def list_run_databases():
