@@ -74,6 +74,7 @@ from lumitec.strategy.definitions import LegMode, StrategyMission, StrategyObjec
 | 20 | `self.act()` calls after every order submission, cancellation, and forced_stop |
 | 22 | All arithmetic using `tick.ask_price`, `tick.bid_price`, `tick.price`, `bar.close`, `bar.open`, `bar.high`, `bar.low` MUST cast to `float` first — these are `decimal.Decimal` in Nautilus. Use `float(tick.ask_price)`. Never mix `Decimal` with `float` in `-`, `+`, `*`, `/` expressions. |
 | 21 | Tick throttle guard in `on_quote_tick`/`on_trade_tick`/`on_symbol_quote_tick`/`on_symbol_trade_tick` — `if time.monotonic() - self._last_tick_ts < self.params.tick_throttle_interval: return`; add `self._last_tick_ts: float = 0.0` in `__init__`; add `tick_throttle_interval: float = 1.0` to `ConfigParams` |
+| 23 | Every `Price(...)` construction MUST use `Price.from_str(f"{price_float:.2f}")` — NEVER `Price(float_value)`. Passing a raw `float` to `Price()` can produce incorrect precision or a runtime error. Always format the float to the required decimal places first: `Price.from_str(f"{buy_price:.2f}")`. |
 
 > **Authoritative fix guide with minimal-fix examples**: see [`validation_loop.md`](validation_loop.md).
 

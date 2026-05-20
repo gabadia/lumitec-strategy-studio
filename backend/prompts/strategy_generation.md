@@ -115,6 +115,23 @@ price = mid - self.params.offset          # Decimal - float = TypeError
 
 ---
 
+## PRICE CONSTRUCTION — MANDATORY FORMAT
+
+**Never pass a raw `float` to `Price()`.** Always use `Price.from_str` with an explicit format string:
+
+```python
+# CORRECT — explicit decimal precision
+price = Price.from_str(f"{buy_price:.2f}")
+
+# WRONG — may produce wrong precision or a runtime error
+price = Price(buy_price)
+```
+
+Use the decimal precision that matches the instrument's tick size (usually `:.2f` for equities).
+This applies to every `submit_limit_order` and any other call that takes a `Price` argument.
+
+---
+
 ## MANDATORY CLASS DEFINITION ORDER
 
 This is a hard requirement. Violating it causes a `NameError` at supervisor load time.

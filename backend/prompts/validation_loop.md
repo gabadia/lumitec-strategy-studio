@@ -71,6 +71,7 @@ All 16 patterns must be present. If the error references one of these, add the m
 | 19 | `self.decide()` before entry/exit | Add before every order decision — e.g. `self.decide("entry signal", context={"reason": "..."})` |
 | 20 | `self.act()` after order actions | Add after every submit/cancel/stop — e.g. `self.act("submitted BUY", context={"qty": qty})` |
 | 21 | Tick throttle guard in `on_quote_tick`/`on_trade_tick`/`on_symbol_quote_tick`/`on_symbol_trade_tick` | Add `if time.monotonic() - self._last_tick_ts < self.params.tick_throttle_interval: return` after `isPaused()` check; add `self._last_tick_ts: float = 0.0` in `__init__`; add `tick_throttle_interval: float = 1.0` to `ConfigParams` |
+| 23 | Every `Price(...)` construction must use `Price.from_str(f"{value:.2f}")` | Replace every `Price(float_value)` with `Price.from_str(f"{float_value:.2f}")` — passing a raw float to `Price()` can produce incorrect precision or a runtime error |
 
 ---
 
