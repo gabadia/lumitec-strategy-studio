@@ -45,6 +45,7 @@ class ConfigParams:
     max_loss_dollars: float = 0.0
     max_exit_retries: int = 5       # new: max resubmit attempts on exit order failure
     adf_pvalue_threshold: float = 0.05  # new: block entry if spread ADF p-value exceeds this (0 = disabled)
+    tick_throttle_interval: float = 5.0  # seconds between z-score observe events
 
     def validate(self) -> None:
         if self.lookback <= 1:
@@ -78,6 +79,8 @@ class ConfigParams:
             raise ValueError("max_exit_retries must be >= 0")
         if not 0.0 <= self.adf_pvalue_threshold <= 1.0:
             raise ValueError("adf_pvalue_threshold must be between 0 and 1")
+        if self.tick_throttle_interval <= 0:
+            raise ValueError("tick_throttle_interval must be > 0")
 
     @classmethod
     def from_config(cls, cfg: Any) -> "ConfigParams":
@@ -373,6 +376,7 @@ class ClaudePairsStrategy(LumitecBaseStrategy):
         self._history_started: Dict[str, bool] = {"A": False, "B": False}
         self._history_complete: Dict[str, bool] = {"A": False, "B": False}
         self._last_heartbeat_ts: Dict[str, float] = {"A": 0.0, "B": 0.0}
+        self._last_z_log_ts: float = 0.0
         # Guard against historical bar replay storm on subscription connect.
         # Set to current wall-clock time in on_start; bars older than this are skipped.
         self._live_after_ts_ns: int = 0
@@ -524,6 +528,17 @@ class ClaudePairsStrategy(LumitecBaseStrategy):
         # new: update rolling hedge ratio (simple price ratio; OLS beta approximation)
         self._beta = self._last_mid_a / self._last_mid_b if self._last_mid_b > 0 else 1.0
 
+        _now = time.monotonic()
+        if _now - self._last_z_log_ts >= self.params.tick_throttle_interval:
+            self._last_z_log_ts = _now
+            self.observe("Z-score", context={
+                "z": round(self._last_z, 4),
+                "spread": round(self._last_spread, 4),
+                "mid_a": round(self._last_mid_a, 4),
+                "mid_b": round(self._last_mid_b, 4),
+                "pair_state": self._pair_state.name,
+            })
+
         self._update_pnl()
 
         if self._cooldown_bars > 0:
@@ -569,6 +584,8 @@ class ClaudePairsStrategy(LumitecBaseStrategy):
                 "leg": leg,
                 "bars_collected": len(prices),
                 "pair_state": self._pair_state.name,
+                "last_z": round(self._last_z, 4),
+                "last_spread": round(self._last_spread, 4),
             })
 
     # ------------------------------------------------------------------
