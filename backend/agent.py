@@ -34,8 +34,10 @@ load_dotenv(override=True)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY", "")
 MCP_SERVER_URL    = os.getenv("MCP_SERVER_URL", "http://localhost:8002/sse")
-ORCHESTRATOR_URL  = os.getenv("ORCHESTRATOR_URL", "http://localhost:8000")
-SUPERVISOR_ID     = os.getenv("SUPERVISOR_ID", "NUAM-DEV")
+ORCHESTRATOR_URL   = os.getenv("ORCHESTRATOR_URL",   "http://localhost:8000")
+SUPERVISOR_ID      = os.getenv("SUPERVISOR_ID",      "NUAM-DEV")
+VALIDATOR_URL      = os.getenv("VALIDATOR_URL",      "http://localhost:8003")  # dev profile — generation fix loop
+VALIDATOR_PROD_URL = os.getenv("VALIDATOR_PROD_URL", "http://localhost:8003")  # prod profile — submit gate
 
 # ─── Prompt paths ────────────────────────────────────────────────────────────
 _PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
@@ -424,7 +426,6 @@ async def _phase_claude_generate(
 # ─── Phase 2: OpenAI validation loop ─────────────────────────────────────────
 
 async def _phase_openai_validate(
-    session: ClientSession,
     code: str,
     validation_system: str,
     turn_offset: int,
@@ -432,10 +433,16 @@ async def _phase_openai_validate(
 ) -> AsyncIterator[dict]:
     """
     Stateless validation loop.
-    Backend calls validate_strategy directly; OpenAI fixes failures.
+    Calls the strategy validator service directly (VALIDATOR_URL); LLM fixes failures.
     Yields SSE events.
     Yields {"type": "_validation_done", "passed": bool, "code": str} at the end.
     """
+
+    def _fmt_errors(errs: list) -> str:
+        return "\n".join(
+            f"- [{e.get('phase', '?')}] {e.get('message', str(e))}" for e in errs
+        )
+
     last_error = ""
     for attempt in range(MAX_VALIDATION_ATTEMPTS):
         turn = turn_offset + attempt + 1
@@ -443,9 +450,14 @@ async def _phase_openai_validate(
         yield {"type": "tool_executing", "name": "validate_strategy", "turn": turn}
         t0 = time.monotonic()
         try:
-            result = await session.call_tool("validate_strategy", {"code": code})
+            async with httpx.AsyncClient(timeout=30.0) as _vc:
+                _vr = await _vc.post(
+                    f"{VALIDATOR_URL}/validate",
+                    json={"code": code, "correlation_id": f"studio-val-{attempt}"},
+                )
+                _vr.raise_for_status()
+                data = _vr.json()
             duration_ms = int((time.monotonic() - t0) * 1000)
-            content = _content_to_str(result.content)
         except Exception as exc:
             duration_ms = int((time.monotonic() - t0) * 1000)
             yield {"type": "tool_error", "id": f"val_{attempt}", "name": "validate_strategy",
@@ -453,7 +465,16 @@ async def _phase_openai_validate(
             yield {"type": "_validation_done", "passed": False, "code": code}
             return
 
-        failed = result.isError or '"all_passed": false' in content or ('"all_passed"' not in content and '"detail"' in content and 'true' not in content)
+        failed = not data.get("validated", False)
+        errors   = data.get("errors",   [])
+        warnings = data.get("warnings", [])
+
+        content_parts = []
+        if errors:
+            content_parts.append("Errors:\n" + _fmt_errors(errors))
+        if warnings:
+            content_parts.append("Warnings:\n" + _fmt_errors(warnings))
+        content = "\n\n".join(content_parts) if content_parts else "Validation passed."
 
         yield {
             "type": "tool_result",
@@ -466,28 +487,8 @@ async def _phase_openai_validate(
         }
 
         if not failed:
-            # Additional structural checks the MCP validator doesn't cover
-            structural_errors = []
-            if 'class Config(LumitecStrategyConfig)' not in code:
-                structural_errors.append("Missing `class Config(LumitecStrategyConfig)` — supervisor cannot load strategy without it")
-            if 'from_config' not in code:
-                structural_errors.append("Missing `from_config` classmethod in ConfigParams")
-            if structural_errors:
-                content = "Structural errors:\n" + "\n".join(f"- {e}" for e in structural_errors)
-                yield {
-                    "type": "tool_result",
-                    "id": f"val_{attempt}_struct",
-                    "name": "validate_strategy",
-                    "content": content,
-                    "duration_ms": 0,
-                    "turn": turn,
-                    "failed": True,
-                }
-                yield {"type": "text_delta", "delta": f"\n**Structural check failed:**\n```\n{content}\n```\n", "turn": turn}
-                last_error = content
-            else:
-                yield {"type": "_validation_done", "passed": True, "code": code}
-                return
+            yield {"type": "_validation_done", "passed": True, "code": code}
+            return
 
         last_error = content
 
@@ -697,15 +698,49 @@ async def _phase_submit(
     # Auto-fix: extract nested Config/ConfigParams to top-level if GPT nested them
     code = _unnest_config_classes(code)
 
-    # Hard gate — catch structural issues before they reach the supervisor
-    pre_errors = []
-    if 'class Config(LumitecStrategyConfig)' not in code:
-        pre_errors.append("Missing `class Config(LumitecStrategyConfig)` — supervisor cannot load strategy without it")
-    if 'from_config' not in code:
-        pre_errors.append("Missing `from_config` classmethod in ConfigParams")
-    if pre_errors:
-        msg = "Cannot submit — structural errors in generated code:\n" + "\n".join(f"- {e}" for e in pre_errors)
-        yield {"type": "text_delta", "delta": msg, "turn": turn}
+    # Hard gate — full production validation before the supervisor sees the code
+    yield {"type": "tool_executing", "name": "validate_strategy", "turn": turn}
+    _t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as _vc:
+            _gr = await _vc.post(
+                f"{VALIDATOR_PROD_URL}/validate",
+                json={"code": code, "correlation_id": f"studio-submit-{uid8}"},
+            )
+            _gr.raise_for_status()
+            gate_data = _gr.json()
+        gate_ms = int((time.monotonic() - _t0) * 1000)
+    except Exception as gate_exc:
+        gate_ms = int((time.monotonic() - _t0) * 1000)
+        yield {"type": "tool_error", "id": "submit_gate", "name": "validate_strategy",
+               "error": str(gate_exc), "duration_ms": gate_ms, "turn": turn}
+        yield {"type": "text_delta",
+               "delta": f"\n**Cannot submit — validator unreachable:** {gate_exc}\n", "turn": turn}
+        yield {"type": "_submit_done", "success": False, "strategy_id": None}
+        return
+
+    gate_errors = gate_data.get("errors", [])
+    gate_passed = gate_data.get("validated", False)
+    gate_content = (
+        "Validation passed."
+        if gate_passed
+        else "Errors:\n" + "\n".join(
+            f"- [{e.get('phase', '?')}] {e.get('message', str(e))}" for e in gate_errors
+        )
+    )
+    yield {
+        "type": "tool_result",
+        "id": "submit_gate",
+        "name": "validate_strategy",
+        "content": gate_content[:2000],
+        "duration_ms": gate_ms,
+        "turn": turn,
+        "failed": not gate_passed,
+    }
+    if not gate_passed:
+        yield {"type": "text_delta",
+               "delta": f"\n**Cannot submit — validation failed:**\n```\n{gate_content[:1500]}\n```",
+               "turn": turn}
         yield {"type": "_submit_done", "success": False, "strategy_id": None}
         return
 
@@ -894,7 +929,11 @@ async def run_strategy_workflow(
                 intent_text = intent
                 claude_turn = 0
 
-                if not existing_code:
+                # Run Phase 1 when:
+                #   - no existing_code  → generate from scratch
+                #   - existing_code + intent → Fix Code path: LLM applies the fix description to the code
+                # Skip when existing_code but no intent → pass code straight to validation as-is
+                if not existing_code or intent.strip():
                     async for event in _phase_claude_generate(
                         intent, existing_code, strategy_name, claude_system, gen_model
                     ):
@@ -915,7 +954,7 @@ async def run_strategy_workflow(
                 validated = False
                 last_error = ""
                 async for event in _phase_openai_validate(
-                    session, code, validation_system, turn_offset=claude_turn, fix_model=val_model
+                    code, validation_system, turn_offset=claude_turn, fix_model=val_model
                 ):
                     if event["type"] == "_validation_done":
                         validated  = event["passed"]
@@ -1017,49 +1056,53 @@ async def run_resubmit_workflow(
 
         # ── Pre-submit validation ─────────────────────────────────────────────
         yield {"type": "text_delta", "delta": "**Validating before resubmit…**\n", "turn": 1}
-        val_blocked = False
-        _val_content: str | None = None
-        _val_failed = False
-        _val_duration_ms = 0
+        _t0 = time.monotonic()
         try:
-            async with sse_client(MCP_SERVER_URL) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    t0 = time.monotonic()
-                    result = await session.call_tool("validate_strategy", {"code": code})
-                    _val_duration_ms = int((time.monotonic() - t0) * 1000)
-                    _val_content = _content_to_str(result.content)
-                    _val_failed = (
-                        result.isError
-                        or '"all_passed": false' in _val_content
-                        or ('"all_passed"' not in _val_content and '"detail"' in _val_content and 'true' not in _val_content)
-                    )
+            async with httpx.AsyncClient(timeout=30.0) as _vc:
+                _vr = await _vc.post(
+                    f"{VALIDATOR_PROD_URL}/validate",
+                    json={"code": code, "correlation_id": uid8},
+                )
+                _vr.raise_for_status()
+                val_data = _vr.json()
+            _val_duration_ms = int((time.monotonic() - _t0) * 1000)
         except Exception as val_exc:
+            _val_duration_ms = int((time.monotonic() - _t0) * 1000)
+            yield {"type": "tool_error", "id": "resubmit_val", "name": "validate_strategy",
+                   "error": str(val_exc), "duration_ms": _val_duration_ms, "turn": 1}
             yield {
                 "type": "text_delta",
-                "delta": f"\n*Warning: validator unreachable ({val_exc}) — proceeding with structural checks only.*\n",
+                "delta": f"\n**Resubmit blocked — validator unreachable:** {val_exc}\n",
                 "turn": 1,
             }
+            yield {"type": "turn_complete", "turn": 1, "stop_reason": "end_turn"}
+            yield {"type": "done"}
+            return
 
-        if _val_content is not None:
+        _val_failed = not val_data.get("validated", False)
+        val_errors  = val_data.get("errors", [])
+        _val_content = (
+            "Validation passed."
+            if not _val_failed
+            else "Errors:\n" + "\n".join(
+                f"- [{e.get('phase', '?')}] {e.get('message', str(e))}" for e in val_errors
+            )
+        )
+        yield {
+            "type": "tool_result",
+            "id": "resubmit_val",
+            "name": "validate_strategy",
+            "content": _val_content[:2000],
+            "duration_ms": _val_duration_ms,
+            "turn": 1,
+            "failed": _val_failed,
+        }
+        if _val_failed:
             yield {
-                "type": "tool_result",
-                "id": "resubmit_val",
-                "name": "validate_strategy",
-                "content": _val_content[:2000],
-                "duration_ms": _val_duration_ms,
+                "type": "text_delta",
+                "delta": f"\n**Resubmit blocked — validation failed:**\n```\n{_val_content[:1500]}\n```",
                 "turn": 1,
-                "failed": _val_failed,
             }
-            if _val_failed:
-                yield {
-                    "type": "text_delta",
-                    "delta": f"\n**Resubmit blocked — validation failed:**\n```\n{_val_content[:1500]}\n```",
-                    "turn": 1,
-                }
-                val_blocked = True
-
-        if val_blocked:
             yield {"type": "turn_complete", "turn": 1, "stop_reason": "end_turn"}
             yield {"type": "done"}
             return
