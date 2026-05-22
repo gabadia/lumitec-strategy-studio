@@ -25,19 +25,25 @@ from typing import AsyncIterator, Any
 import anthropic
 import httpx
 from dotenv import load_dotenv
-from mcp import ClientSession
-from mcp.client.sse import sse_client
 
 load_dotenv(override=True)
 
 # ─── API keys ────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY", "")
-MCP_SERVER_URL    = os.getenv("MCP_SERVER_URL", "http://localhost:8002/sse")
 ORCHESTRATOR_URL   = os.getenv("ORCHESTRATOR_URL",   "http://localhost:8000")
 SUPERVISOR_ID      = os.getenv("SUPERVISOR_ID",      "NUAM-DEV")
 VALIDATOR_URL      = os.getenv("VALIDATOR_URL",      "http://localhost:8003")  # dev profile — generation fix loop
 VALIDATOR_PROD_URL = os.getenv("VALIDATOR_PROD_URL", "http://localhost:8003")  # prod profile — submit gate
+
+# ─── Static capability manifest (replaces MCP tool discovery) ────────────────
+STUDIO_TOOLS = [
+    "generate_strategy",
+    "validate_strategy",
+    "run_test_scenarios",
+    "analyze_execution",
+    "query_run_events",
+]
 
 # ─── Prompt paths ────────────────────────────────────────────────────────────
 _PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
@@ -907,111 +913,104 @@ async def run_strategy_workflow(
     reasoning_system  = _load_reasoning_system()
 
     try:
-        async with sse_client(MCP_SERVER_URL) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
+        yield {"type": "tools_ready", "tools": STUDIO_TOOLS, "count": len(STUDIO_TOOLS)}
 
-                BLOCKED = {"publish_strategy", "stream_events", "submit_strategy"}
-                tools_response = await session.list_tools()
-                tool_names = [t.name for t in tools_response.tools if t.name not in BLOCKED]
-                yield {"type": "tools_ready", "tools": tool_names, "count": len(tool_names)}
+        # Time window — default to NYSE session (stored as UTC)
+        ET = ZoneInfo("America/New_York")
+        today_et = datetime.now(ET).date()
+        start_dt = datetime(today_et.year, today_et.month, today_et.day, 9, 30, 0, tzinfo=ET)
+        end_dt   = datetime(today_et.year, today_et.month, today_et.day, 16, 0, 0, tzinfo=ET)
+        start_iso, end_iso = _iso(start_dt), _iso(end_dt)
+        uid8 = uuid.uuid4().hex[:8]
 
-                # Time window — default to NYSE session (stored as UTC)
-                ET = ZoneInfo("America/New_York")
-                today_et = datetime.now(ET).date()
-                start_dt = datetime(today_et.year, today_et.month, today_et.day, 9, 30, 0, tzinfo=ET)
-                end_dt   = datetime(today_et.year, today_et.month, today_et.day, 16, 0, 0, tzinfo=ET)
-                start_iso, end_iso = _iso(start_dt), _iso(end_dt)
-                uid8 = uuid.uuid4().hex[:8]
+        # ── Phase 1: Generate ──────────────────────────────────────
+        code = existing_code or ""
+        intent_text = intent
+        claude_turn = 0
 
-                # ── Phase 1: Generate ──────────────────────────────────────
-                code = existing_code or ""
-                intent_text = intent
-                claude_turn = 0
+        # Run Phase 1 when:
+        #   - no existing_code  → generate from scratch
+        #   - existing_code + intent → Fix Code path: LLM applies the fix description to the code
+        # Skip when existing_code but no intent → pass code straight to validation as-is
+        if not existing_code or intent.strip():
+            async for event in _phase_claude_generate(
+                intent, existing_code, strategy_name, claude_system, gen_model
+            ):
+                if event["type"] == "_code_ready":
+                    code        = event["code"]
+                    intent_text = event["intent_text"]
+                    claude_turn = 1
+                else:
+                    yield event
 
-                # Run Phase 1 when:
-                #   - no existing_code  → generate from scratch
-                #   - existing_code + intent → Fix Code path: LLM applies the fix description to the code
-                # Skip when existing_code but no intent → pass code straight to validation as-is
-                if not existing_code or intent.strip():
-                    async for event in _phase_claude_generate(
-                        intent, existing_code, strategy_name, claude_system, gen_model
-                    ):
-                        if event["type"] == "_code_ready":
-                            code        = event["code"]
-                            intent_text = event["intent_text"]
-                            claude_turn = 1
-                        else:
-                            yield event
+        if not code:
+            yield {"type": "error", "message": "Failed to extract strategy code from Claude output"}
+            return
 
-                if not code:
-                    yield {"type": "error", "message": "Failed to extract strategy code from Claude output"}
-                    return
+        metadata = _extract_metadata(code, intent)
 
-                metadata = _extract_metadata(code, intent)
+        # ── Phase 2: Validate + fix ────────────────────────────────
+        validated = False
+        last_error = ""
+        async for event in _phase_openai_validate(
+            code, validation_system, turn_offset=claude_turn, fix_model=val_model
+        ):
+            if event["type"] == "_validation_done":
+                validated  = event["passed"]
+                code       = event["code"]
+                last_error = event.get("last_error", "")
+            else:
+                yield event
 
-                # ── Phase 2: Validate + fix ────────────────────────────────
-                validated = False
-                last_error = ""
-                async for event in _phase_openai_validate(
-                    code, validation_system, turn_offset=claude_turn, fix_model=val_model
-                ):
-                    if event["type"] == "_validation_done":
-                        validated  = event["passed"]
-                        code       = event["code"]
-                        last_error = event.get("last_error", "")
-                    else:
-                        yield event
+        summary_turn = claude_turn + MAX_VALIDATION_ATTEMPTS + 1
 
-                summary_turn = claude_turn + MAX_VALIDATION_ATTEMPTS + 1
+        if not validated:
+            msg = "Validation failed after maximum attempts. Cannot submit."
+            if last_error:
+                msg += f"\n\nLast error:\n```\n{last_error[:1500]}\n```"
+            yield {"type": "text_delta", "delta": msg, "turn": summary_turn}
+            yield {"type": "turn_complete", "turn": summary_turn, "stop_reason": "end_turn"}
+            yield {"type": "done"}
+            return
 
-                if not validated:
-                    msg = "Validation failed after maximum attempts. Cannot submit."
-                    if last_error:
-                        msg += f"\n\nLast error:\n```\n{last_error[:1500]}\n```"
-                    yield {"type": "text_delta", "delta": msg, "turn": summary_turn}
-                    yield {"type": "turn_complete", "turn": summary_turn, "stop_reason": "end_turn"}
-                    yield {"type": "done"}
-                    return
+        # ── Phase 3: Test scenarios (full only) ────────────────────
+        scenarios: list = []
+        test_turn = summary_turn + 1
+        print(f"[workflow] mode={workflow_mode} validated={validated} proceeding to phase 3", flush=True)
+        if workflow_mode == "full":
+            async for event in _phase_generate_test_scenarios(
+                code, intent_text, testing_system, val_model, test_turn
+            ):
+                if event["type"] == "_scenarios_ready":
+                    scenarios = event["scenarios"]
+                else:
+                    yield event
 
-                # ── Phase 3: Test scenarios (full only) ────────────────────
-                scenarios: list = []
-                test_turn = summary_turn + 1
-                print(f"[workflow] mode={workflow_mode} validated={validated} proceeding to phase 3", flush=True)
-                if workflow_mode == "full":
-                    async for event in _phase_generate_test_scenarios(
-                        code, intent_text, testing_system, val_model, test_turn
-                    ):
-                        if event["type"] == "_scenarios_ready":
-                            scenarios = event["scenarios"]
-                        else:
-                            yield event
+        # ── Phase 4: Evaluate behavior (full only) ─────────────────
+        reasoning_turn = test_turn + 1
+        print(f"[workflow] phase 4: scenarios={len(scenarios)}", flush=True)
+        if workflow_mode == "full" and scenarios:
+            async for event in _phase_reason_test_scenarios(
+                code, scenarios, reasoning_system, val_model, reasoning_turn
+            ):
+                if event["type"] != "_reasoning_done":
+                    yield event
 
-                # ── Phase 4: Evaluate behavior (full only) ─────────────────
-                reasoning_turn = test_turn + 1
-                print(f"[workflow] phase 4: scenarios={len(scenarios)}", flush=True)
-                if workflow_mode == "full" and scenarios:
-                    async for event in _phase_reason_test_scenarios(
-                        code, scenarios, reasoning_system, val_model, reasoning_turn
-                    ):
-                        if event["type"] != "_reasoning_done":
-                            yield event
-
-                # ── Phase 5: Emit params_ready — frontend handles explicit submission ─
-                # strategy_params must always be explicitly provided by the caller;
-                # we never silently infer them. Parse the code here and hand the
-                # defaults to the frontend so the user can review/edit before submit.
-                params_turn = (reasoning_turn + 1) if workflow_mode == "full" else (summary_turn + 1)
-                parsed = _parse_submission(code)
-                yield {
-                    "type": "params_ready",
-                    "code": code,
-                    "legs": parsed["legs"],
-                    "params": parsed["params"],
-                    "turn": params_turn,
-                }
-                yield {"type": "turn_complete", "turn": params_turn, "stop_reason": "end_turn"}
-                yield {"type": "done"}
+        # ── Phase 5: Emit params_ready — frontend handles explicit submission ─
+        # strategy_params must always be explicitly provided by the caller;
+        # we never silently infer them. Parse the code here and hand the
+        # defaults to the frontend so the user can review/edit before submit.
+        params_turn = (reasoning_turn + 1) if workflow_mode == "full" else (summary_turn + 1)
+        parsed = _parse_submission(code)
+        yield {
+            "type": "params_ready",
+            "code": code,
+            "legs": parsed["legs"],
+            "params": parsed["params"],
+            "turn": params_turn,
+        }
+        yield {"type": "turn_complete", "turn": params_turn, "stop_reason": "end_turn"}
+        yield {"type": "done"}
 
     except BaseException as exc:
         import traceback
