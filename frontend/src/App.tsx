@@ -263,7 +263,7 @@ export default function App() {
           eventSourceRef.current = null
           return
         }
-        const terminationType = raw.termination_type as string | undefined
+        const terminationType = raw.termination_type as 'COMPLETED' | 'EXPIRED' | 'STOPPED' | 'FAILED' | undefined
         eventBuffer.push({
           id: nextStrategyEventId(),
           timestamp: Date.now(),
