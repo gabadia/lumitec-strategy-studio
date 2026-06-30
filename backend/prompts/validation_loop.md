@@ -26,6 +26,12 @@ Your sole job is to fix validation errors. Do not redesign, refactor, or improve
 6. If after 2 attempts the error persists, output the code as-is with a comment at the top:
    `# FIX FAILED: <error summary>`
 
+For market-data lifecycle failures, apply these exact fixes:
+- If error is `Quote subscription found but matching quote unsubscription missing in on_stop`, add matching quote unsubscription in `on_stop`.
+- If error is `Bar subscription found but matching bar unsubscription missing in on_stop`, add matching bar unsubscription in `on_stop`.
+- If error is `on_stop is missing while market-data subscriptions are present`, add `on_stop` and include matching unsubscriptions.
+- Keep this exact line in `on_stop`: `# teardown must mirror setup exactly`
+
 ---
 
 ## Required Imports (use these exactly)
@@ -72,6 +78,7 @@ All 16 patterns must be present. If the error references one of these, add the m
 | 20 | `self.act()` after order actions | Add after every submit/cancel/stop — e.g. `self.act("submitted BUY", context={"qty": qty})` |
 | 21 | Tick throttle guard in `on_quote_tick`/`on_trade_tick`/`on_symbol_quote_tick`/`on_symbol_trade_tick` | Add `if time.monotonic() - self._last_tick_ts < self.params.tick_throttle_interval: return` after `isPaused()` check; add `self._last_tick_ts: float = 0.0` in `__init__`; add `tick_throttle_interval: float = 1.0` to `ConfigParams` |
 | 23 | Every `Price(...)` construction must use `Price.from_str(f"{value:.2f}")` | Replace every `Price(float_value)` with `Price.from_str(f"{float_value:.2f}")` — passing a raw float to `Price()` can produce incorrect precision or a runtime error |
+| 24 | Symmetric market-data teardown | If quotes are subscribed, add matching quote unsubscribe in `on_stop`; if bars are subscribed, add matching bar unsubscribe in `on_stop`; add `on_stop` if missing |
 
 ---
 

@@ -156,7 +156,15 @@ def on_start(self) -> None:
         step=self.params.sampling_period_seconds,
         price_type=PriceType.MID,
     )
+
+    self.subscribe_market_data(
+        self.symbol_a,
+        subscribe_quotes=True,
+        subscribe_trades=False,
+    )
 ```
+
+If a strategy uses bars and/or quotes, subscriptions must be set in `on_start` and mirrored by matching unsubscriptions in `on_stop`.
 
 ### apply_params + configure — required for hot parameter updates
 ```python
@@ -189,6 +197,18 @@ Called by the supervisor controller before instantiation. Raise `ValueError` wit
 ### on_stop, on_order_rejected, on_order_cancelled — must be present
 ```python
 def on_stop(self) -> None:
+    # teardown must mirror setup exactly
+    self.unsubscribe_market_data_bars(
+        symbol=self.symbol_a,
+        aggregation=BarAggregation.SECOND,
+        step=self.params.sampling_period_seconds,
+        price_type=PriceType.MID,
+    )
+    self.unsubscribe_market_data(
+        self.symbol_a,
+        subscribe_quotes=True,
+        subscribe_trades=False,
+    )
     self.observe("Strategy stopped")
 
 def on_order_rejected(self, event) -> None:
@@ -205,8 +225,14 @@ def on_order_cancelled(self, event) -> None:
 # Bar data (recommended — fires on_symbol_bar)
 self.subscribe_market_data_bars(symbol, BarAggregation.SECOND, step=5, price_type=PriceType.MID)
 
+# Bar teardown (required in on_stop when bars are used)
+self.unsubscribe_market_data_bars(symbol, BarAggregation.SECOND, step=5, price_type=PriceType.MID)
+
 # Quote / trade ticks (fires on_symbol_quote_tick / on_symbol_trade_tick)
 self.subscribe_market_data(symbol, subscribe_quotes=True, subscribe_trades=False)
+
+# Quote teardown (required in on_stop when quotes are used)
+self.unsubscribe_market_data(symbol, subscribe_quotes=True, subscribe_trades=False)
 
 # Last quote
 quote = self.last_quote(symbol)   # None if no data yet
@@ -460,7 +486,7 @@ self.decide("Regime changed", context={"regime": new_regime})
 
 ## Validation checklist
 
-Before publishing, all 18 of these must be present in your file:
+Before publishing, all 19 of these must be present in your file:
 
 | # | Pattern |
 |---|------|
@@ -482,6 +508,7 @@ Before publishing, all 18 of these must be present in your file:
 | 16 | `on_pause()` / `on_resume()` hooks (not `pause()`/`resume()`) |
 | 17 | `self.params` and `self._param_lock = RLock()` initialised in `__init__`, not `on_start` |
 | 18 | `tick_throttle_interval` in `ConfigParams`; `self._last_tick_ts = 0.0` in `__init__`; timestamp throttle guard in every tick handler that calls observe/decide/act |
+| 19 | Symmetric market-data lifecycle: if quotes/bars are subscribed in `on_start`, matching quote/bar unsubscriptions must appear in `on_stop` |
 
 Forbidden imports (publish will be rejected if found):
 `subprocess`, `socket`, `requests`, `os.system`, `urllib`

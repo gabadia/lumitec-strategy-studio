@@ -11,6 +11,7 @@ Requires OPENAI_API_KEY in .env.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import os
@@ -82,6 +83,12 @@ MAX_RETRIES             = 5
 RETRY_BASE_DELAY        = 60
 MAX_VALIDATION_ATTEMPTS = 3
 MAX_SIMULATION_POLLS    = 60  # kept for reference, no longer used in agent
+
+# ─── Local market-data lifecycle validation ─────────────────────────────────
+_QUOTE_SUB_RE = re.compile(r"subscribe_market_data\s*\([^)]*subscribe_quotes\s*=\s*True", re.IGNORECASE | re.DOTALL)
+_QUOTE_UNSUB_RE = re.compile(r"unsubscribe_market_data\s*\([^)]*subscribe_quotes\s*=\s*True", re.IGNORECASE | re.DOTALL)
+_BAR_SUB_RE = re.compile(r"subscribe_market_data_bars\s*\(", re.IGNORECASE)
+_BAR_UNSUB_RE = re.compile(r"unsubscribe_market_data_bars\s*\(", re.IGNORECASE)
 
 # ─── Clients ─────────────────────────────────────────────────────────────────
 _anthropic = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
@@ -298,6 +305,65 @@ def _clean_openai_code(text: str) -> str:
     return text.strip()
 
 
+def _get_strategy_method_source(code: str, method_name: str) -> str | None:
+    """Return source text for method on the LumitecBaseStrategy subclass, if present."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+
+    strategy_class = None
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for base in node.bases:
+            if isinstance(base, ast.Name) and base.id == "LumitecBaseStrategy":
+                strategy_class = node
+                break
+            if isinstance(base, ast.Attribute) and base.attr == "LumitecBaseStrategy":
+                strategy_class = node
+                break
+        if strategy_class:
+            break
+
+    if not strategy_class:
+        return None
+
+    lines = code.splitlines()
+    for node in strategy_class.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == method_name:
+            if node.end_lineno is None:
+                return None
+            return "\n".join(lines[node.lineno - 1 : node.end_lineno])
+    return None
+
+
+def _check_market_data_lifecycle(code: str) -> list[str]:
+    """Return lifecycle policy violations for quote/bar subscribe-unsubscribe symmetry."""
+    errors: list[str] = []
+    if not code:
+        return errors
+
+    quote_sub_present = bool(_QUOTE_SUB_RE.search(code))
+    bar_sub_present = bool(_BAR_SUB_RE.search(code))
+
+    if not (quote_sub_present or bar_sub_present):
+        return errors
+
+    on_stop_src = _get_strategy_method_source(code, "on_stop")
+    if not on_stop_src:
+        errors.append("on_stop is missing while market-data subscriptions are present")
+        return errors
+
+    if quote_sub_present and not _QUOTE_UNSUB_RE.search(on_stop_src):
+        errors.append("Quote subscription found but matching quote unsubscription missing in on_stop")
+
+    if bar_sub_present and not _BAR_UNSUB_RE.search(on_stop_src):
+        errors.append("Bar subscription found but matching bar unsubscription missing in on_stop")
+
+    return errors
+
+
 # ─── Unified LLM helpers ─────────────────────────────────────────────────────
 
 async def _stream_text(model: str, system: str, user: str, max_tokens: int = 16000) -> AsyncIterator[str]:
@@ -454,33 +520,39 @@ async def _phase_openai_validate(
         turn = turn_offset + attempt + 1
 
         yield {"type": "tool_executing", "name": "validate_strategy", "turn": turn}
-        t0 = time.monotonic()
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as _vc:
-                _vr = await _vc.post(
-                    f"{VALIDATOR_URL}/validate",
-                    json={"code": code, "correlation_id": f"studio-val-{attempt}"},
-                )
-                _vr.raise_for_status()
-                data = _vr.json()
-            duration_ms = int((time.monotonic() - t0) * 1000)
-        except Exception as exc:
-            duration_ms = int((time.monotonic() - t0) * 1000)
-            yield {"type": "tool_error", "id": f"val_{attempt}", "name": "validate_strategy",
-                   "error": str(exc), "duration_ms": duration_ms, "turn": turn}
-            yield {"type": "_validation_done", "passed": False, "code": code}
-            return
+        local_errors = _check_market_data_lifecycle(code)
+        if local_errors:
+            failed = True
+            duration_ms = 0
+            content = "Errors:\n" + "\n".join(f"- [market_data_lifecycle] {msg}" for msg in local_errors)
+        else:
+            t0 = time.monotonic()
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as _vc:
+                    _vr = await _vc.post(
+                        f"{VALIDATOR_URL}/validate",
+                        json={"code": code, "correlation_id": f"studio-val-{attempt}"},
+                    )
+                    _vr.raise_for_status()
+                    data = _vr.json()
+                duration_ms = int((time.monotonic() - t0) * 1000)
+            except Exception as exc:
+                duration_ms = int((time.monotonic() - t0) * 1000)
+                yield {"type": "tool_error", "id": f"val_{attempt}", "name": "validate_strategy",
+                       "error": str(exc), "duration_ms": duration_ms, "turn": turn}
+                yield {"type": "_validation_done", "passed": False, "code": code}
+                return
 
-        failed = not data.get("validated", False)
-        errors   = data.get("errors",   [])
-        warnings = data.get("warnings", [])
+            failed = not data.get("validated", False)
+            errors   = data.get("errors",   [])
+            warnings = data.get("warnings", [])
 
-        content_parts = []
-        if errors:
-            content_parts.append("Errors:\n" + _fmt_errors(errors))
-        if warnings:
-            content_parts.append("Warnings:\n" + _fmt_errors(warnings))
-        content = "\n\n".join(content_parts) if content_parts else "Validation passed."
+            content_parts = []
+            if errors:
+                content_parts.append("Errors:\n" + _fmt_errors(errors))
+            if warnings:
+                content_parts.append("Warnings:\n" + _fmt_errors(warnings))
+            content = "\n\n".join(content_parts) if content_parts else "Validation passed."
 
         yield {
             "type": "tool_result",
@@ -703,6 +775,26 @@ async def _phase_submit(
     """
     # Auto-fix: extract nested Config/ConfigParams to top-level if GPT nested them
     code = _unnest_config_classes(code)
+
+    local_errors = _check_market_data_lifecycle(code)
+    if local_errors:
+        gate_content = "Errors:\n" + "\n".join(f"- [market_data_lifecycle] {msg}" for msg in local_errors)
+        yield {
+            "type": "tool_result",
+            "id": "submit_gate",
+            "name": "validate_strategy",
+            "content": gate_content[:2000],
+            "duration_ms": 0,
+            "turn": turn,
+            "failed": True,
+        }
+        yield {
+            "type": "text_delta",
+            "delta": f"\n**Cannot submit — validation failed:**\n```\n{gate_content[:1500]}\n```",
+            "turn": turn,
+        }
+        yield {"type": "_submit_done", "success": False, "strategy_id": None}
+        return
 
     # Hard gate — full production validation before the supervisor sees the code
     yield {"type": "tool_executing", "name": "validate_strategy", "turn": turn}
@@ -1052,6 +1144,27 @@ async def run_resubmit_workflow(
     try:
         metadata = _extract_metadata(code)
         metadata["legs"] = legs  # user-supplied legs override extracted ones
+
+        local_errors = _check_market_data_lifecycle(code)
+        if local_errors:
+            _val_content = "Errors:\n" + "\n".join(f"- [market_data_lifecycle] {msg}" for msg in local_errors)
+            yield {
+                "type": "tool_result",
+                "id": "resubmit_val",
+                "name": "validate_strategy",
+                "content": _val_content[:2000],
+                "duration_ms": 0,
+                "turn": 1,
+                "failed": True,
+            }
+            yield {
+                "type": "text_delta",
+                "delta": f"\n**Resubmit blocked — validation failed:**\n```\n{_val_content[:1500]}\n```",
+                "turn": 1,
+            }
+            yield {"type": "turn_complete", "turn": 1, "stop_reason": "end_turn"}
+            yield {"type": "done"}
+            return
 
         # ── Pre-submit validation ─────────────────────────────────────────────
         yield {"type": "text_delta", "delta": "**Validating before resubmit…**\n", "turn": 1}

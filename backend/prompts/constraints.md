@@ -21,6 +21,17 @@ The strategy logic must check these limits before every order submission.
 
 ---
 
+## Market-Data Lifecycle Policy (Mandatory)
+
+Every strategy must manage market-data lifecycle explicitly.
+If quotes are used, strategy must subscribe on start and unsubscribe on stop.
+If bars are used, strategy must subscribe on start and unsubscribe on stop.
+Validation must reject strategies that do not include symmetric subscribe/unsubscribe behavior.
+
+No strategy can be marked valid without symmetric teardown in `on_stop`.
+
+---
+
 ## Forbidden Imports
 
 The following imports will cause the supervisor to reject the strategy at load time:

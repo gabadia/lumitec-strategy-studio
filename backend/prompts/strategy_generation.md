@@ -174,6 +174,25 @@ The implementation must:
 
 ---
 
+## MARKET-DATA LIFECYCLE POLICY (MANDATORY)
+
+Every strategy must manage market-data lifecycle explicitly.
+If quotes are used, strategy must subscribe on start and unsubscribe on stop.
+If bars are used, strategy must subscribe on start and unsubscribe on stop.
+Validation must reject strategies that do not include symmetric subscribe/unsubscribe behavior.
+
+This is mandatory, not optional:
+- If strategy uses quotes, it must subscribe in `on_start` and unsubscribe in `on_stop`.
+- If strategy uses bars, it must subscribe in `on_start` and unsubscribe in `on_stop`.
+- No strategy can be considered valid without symmetric teardown.
+
+Default template contract:
+- `on_start`: include subscribe calls for all used data types.
+- `on_stop`: include matching unsubscribe calls for those subscriptions.
+- Include this exact one-line comment in `on_stop`: `# teardown must mirror setup exactly`
+
+---
+
 ## REASONING INSTRUMENTATION (MANDATORY)
 
 Use these methods to expose runtime behavior:
