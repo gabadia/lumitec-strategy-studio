@@ -946,6 +946,7 @@ _TERMINAL_EVENTS = {
     "strategy.stopped":   None,       # termination_type resolved via stop_reason
     "strategy.failed":    "FAILED",
     "strategy.completed": "COMPLETED",
+    "strategy.expired":   "EXPIRED",
 }
 
 # Maps stop_reason field (from FORCED_STOP event) to enriched termination_type.
