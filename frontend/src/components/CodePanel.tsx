@@ -52,6 +52,25 @@ export default function CodePanel() {
 
   const isDirty = loadedStrategyName !== null && code !== savedCode
 
+  const inferDefaultName = useCallback((): string => {
+    if (loadedStrategyName) return loadedStrategyName
+    if (!code) return 'my_strategy'
+
+    const fileNameMatch = code.match(/file_name\s*:\s*str\s*=\s*["']([^"']+)["']/)
+    if (fileNameMatch?.[1]) {
+      return fileNameMatch[1].replace(/\.py$/i, '')
+    }
+
+    const classMatch = code.match(/class\s+(\w+)\s*\(LumitecBaseStrategy\)/)
+    if (classMatch?.[1]) {
+      return classMatch[1]
+        .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+        .toLowerCase()
+    }
+
+    return 'my_strategy'
+  }, [loadedStrategyName, code])
+
   const save = useCallback(async (): Promise<boolean> => {
     if (!loadedStrategyName || !code || saving) return false
     setSaving(true)
@@ -80,6 +99,44 @@ export default function CodePanel() {
       setSaving(false)
     }
   }, [loadedStrategyName, code, saving, setSavedCode])
+
+  const saveAs = useCallback(async (): Promise<boolean> => {
+    if (!code || saving) return false
+
+    const defaultName = inferDefaultName()
+    const raw = window.prompt('Save strategy as (without .py)', defaultName)
+    if (raw === null) return false
+
+    const name = raw.trim().replace(/\.py$/i, '')
+    if (!name) return false
+
+    setSaving(true)
+    setSaveStatus('idle')
+    try {
+      const r = await fetch(`/api/strategies/${encodeURIComponent(name)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', ...getTraderHeaders() },
+        body: JSON.stringify({ code }),
+      })
+      if (r.ok) {
+        setLoadedStrategyName(name)
+        setSavedCode(code)
+        setSaveStatus('saved')
+        setTimeout(() => setSaveStatus('idle'), 2000)
+        return true
+      }
+
+      setSaveStatus('error')
+      setTimeout(() => setSaveStatus('idle'), 2000)
+      return false
+    } catch {
+      setSaveStatus('error')
+      setTimeout(() => setSaveStatus('idle'), 2000)
+      return false
+    } finally {
+      setSaving(false)
+    }
+  }, [code, saving, inferDefaultName, setLoadedStrategyName, setSavedCode])
 
   const doClose = useCallback(() => {
     setCode('')
@@ -134,26 +191,48 @@ export default function CodePanel() {
         )}
 
         {/* Save button — only when a named strategy is loaded and not running */}
-        {loadedStrategyName && !isRunning && (
+        {!isRunning && code && (
           <>
             <button
-              onClick={save}
-              disabled={saving || !isDirty}
-              title={`Save back to ${loadedStrategyName}.py`}
+              onClick={saveAs}
+              disabled={saving}
+              title="Save strategy under a filename"
               style={{
                 padding: '2px 10px',
                 background: 'var(--surface-2)',
                 border: '1px solid var(--border)',
                 borderRadius: 3,
-                color: saving || !isDirty ? 'var(--text-muted)' : 'var(--text-dim)',
+                color: saving ? 'var(--text-muted)' : 'var(--text-dim)',
                 fontSize: 11,
                 fontFamily: 'var(--font-mono)',
                 fontWeight: 600,
-                cursor: saving || !isDirty ? 'default' : 'pointer',
+                cursor: saving ? 'default' : 'pointer',
               }}
             >
-              {saving ? 'Saving…' : 'Save'}
+              Save As
             </button>
+
+            {loadedStrategyName && (
+              <button
+                onClick={save}
+                disabled={saving || !isDirty}
+                title={`Save back to ${loadedStrategyName}.py`}
+                style={{
+                  padding: '2px 10px',
+                  background: 'var(--surface-2)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 3,
+                  color: saving || !isDirty ? 'var(--text-muted)' : 'var(--text-dim)',
+                  fontSize: 11,
+                  fontFamily: 'var(--font-mono)',
+                  fontWeight: 600,
+                  cursor: saving || !isDirty ? 'default' : 'pointer',
+                }}
+              >
+                {saving ? 'Saving…' : 'Save'}
+              </button>
+            )}
+
             <button
               onClick={handleClose}
               disabled={saving}

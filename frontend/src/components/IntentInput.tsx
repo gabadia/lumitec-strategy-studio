@@ -119,6 +119,7 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
   // auto-open the Change Submission form pre-populated — user must explicitly submit
   useEffect(() => {
     if (!pendingSubmission) return
+    setShowFixCode(false)
     // Default times: NYSE session (09:30–16:00 ET)
     const toLocal = (d: Date) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
     const etDateStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
@@ -142,6 +143,7 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
     setParseBusy(true)
     setIsFirstSubmit(false)
     setShowFeedback(false)
+    setShowFixCode(false)
     // Default times: NYSE session (09:30–16:00 ET) in local browser time
     const toLocal = (d: Date) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
     const etDateStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) // YYYY-MM-DD
@@ -201,6 +203,7 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
       `Runtime error to fix:\n${feedback.trim()}`
     setFeedback('')
     setShowFeedback(false)
+    setShowFixCode(false)
     onRun(fixIntent, undefined, editorCode, 'fast')
   }, [feedback, intent, editorCode, isRunning, busy, onRun])
 
@@ -513,6 +516,7 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
           marginTop: 8, padding: '10px 12px',
           background: 'var(--surface-2)', border: '1px solid var(--accent)',
           borderRadius: 6, display: 'flex', flexDirection: 'column', gap: 10,
+          maxHeight: '62vh', overflowY: 'auto',
         }}>
           <div style={{ fontSize: 11, color: 'var(--accent)', fontFamily: 'var(--font-mono)', letterSpacing: '0.05em' }}>
             CHANGE SUBMISSION
