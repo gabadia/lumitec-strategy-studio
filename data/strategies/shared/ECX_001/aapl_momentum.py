@@ -143,6 +143,19 @@ class AaplMomentum(LumitecBaseStrategy):
         if self.isPaused():
             return
 
+        # Log every received bar with all 5 OHLCV values and its timestamp
+        self.observe(
+            "Bar received",
+            context={
+                "ts": str(bar.ts_event),
+                "open": float(bar.open),
+                "high": float(bar.high),
+                "low": float(bar.low),
+                "close": float(bar.close),
+                "volume": float(bar.volume),
+            },
+        )
+
         mid = float(bar.close)
         self._last_mid = mid
         self._prices.append(mid)
@@ -322,6 +335,13 @@ class AaplMomentum(LumitecBaseStrategy):
         self.observe(f"Order cancelled: {event.client_order_id.value}")
 
     def on_stop(self) -> None:
+        # teardown must mirror setup exactly
+        self.unsubscribe_market_data_bars(
+            symbol=self.symbol_a,
+            aggregation=BarAggregation.SECOND,
+            step=self.params.sampling_period_seconds,
+            price_type=PriceType.MID,
+        )
         self.cancelAllOrders()
         if self._position_qty > 0 and not self._exit_pending:
             self.observe("Flattening open position on stop", context={"qty": self._position_qty})

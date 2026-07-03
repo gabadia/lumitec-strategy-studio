@@ -340,7 +340,6 @@ class ClaudePairsStrategy(LumitecBaseStrategy):
         self._pnl_limit_reached: bool = False
         self._shutting_down: bool = False
         self._exit_retry_count: int = 0     # new: tracks consecutive exit order failures
-        self._adf_block_cooldown: int = 0   # throttle: bars remaining before next ADF-block log
 
         self._signal_engine = PairsSignalEngine(
             entry_z=self.params.entry_z,
@@ -467,11 +466,24 @@ class ClaudePairsStrategy(LumitecBaseStrategy):
         )
 
     def on_stop(self) -> None:
+        # teardown must mirror setup exactly
         self.act("Strategy stopped", context={
             "pair_state": self._pair_state.name,
             "realized_pnl": round(self._realized_pnl, 2),
             "unrealized_pnl": round(self._unrealized_pnl, 2),
         })
+        self.unsubscribe_market_data_bars(
+            symbol=self.symbol_a,
+            aggregation=BarAggregation.SECOND,
+            step=self.params.sampling_period_seconds,
+            price_type=PriceType.MID,
+        )
+        self.unsubscribe_market_data_bars(
+            symbol=self.symbol_b,
+            aggregation=BarAggregation.SECOND,
+            step=self.params.sampling_period_seconds,
+            price_type=PriceType.MID,
+        )
 
     def on_pause(self, reason: str = "") -> None:
         self.cancelAllOrders()
@@ -544,9 +556,6 @@ class ClaudePairsStrategy(LumitecBaseStrategy):
         if self._cooldown_bars > 0:
             self._cooldown_bars -= 1
 
-        if self._adf_block_cooldown > 0:
-            self._adf_block_cooldown -= 1
-
         if self._pair_state == PairState.OPEN:
             self._bars_since_entry += 1
 
@@ -614,14 +623,12 @@ class ClaudePairsStrategy(LumitecBaseStrategy):
             spread_series = list(self._spread_stats._window)
             adf_stat, adf_pval = AdfTest.test(spread_series)
             if adf_pval > self.params.adf_pvalue_threshold:
-                if self._adf_block_cooldown == 0:
-                    self.observe("Entry blocked: spread not stationary", context={
-                        "adf_stat": round(adf_stat, 4),
-                        "adf_pval": round(adf_pval, 4),
-                        "threshold": self.params.adf_pvalue_threshold,
-                        "z": round(z, 4),
-                    })
-                    self._adf_block_cooldown = 12  # ~60s at 5s bars; re-logs if still blocked
+                self.observe("Entry blocked: spread not stationary", context={
+                    "adf_stat": round(adf_stat, 4),
+                    "adf_pval": round(adf_pval, 4),
+                    "threshold": self.params.adf_pvalue_threshold,
+                    "z": round(z, 4),
+                })
                 return
 
         side_a = OrderSide.SELL if z > 0 else OrderSide.BUY
