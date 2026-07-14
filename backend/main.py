@@ -67,6 +67,8 @@ from agent import (
 load_dotenv()
 
 SSE_GATEWAY_URL = os.getenv("SSE_GATEWAY_URL", "http://localhost:9001")
+STRATEGY_SERVER_URL = os.getenv("STRATEGY_SERVER_URL", "http://localhost:8001")
+STRATEGY_SERVER_PUBLISH_PATH = os.getenv("STRATEGY_SERVER_PUBLISH_PATH", "/strategies/publish")
 
 app = FastAPI(title="Lumitec Strategy Studio")
 
@@ -207,6 +209,11 @@ class ResubmitStrategyRequest(BaseModel):
     monitor_model: str | None = None
     start_time: str | None = None   # ISO 8601 UTC — if omitted, defaults to NYSE open
     end_time: str | None = None     # ISO 8601 UTC — if omitted, defaults to NYSE close
+
+
+class PublishStrategyRequest(BaseModel):
+    name: str
+    code: str
 
 
 class AskRunRequest(BaseModel):
@@ -907,6 +914,54 @@ async def resubmit_strategy(body: ResubmitStrategyRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/publish-strategy")
+async def publish_strategy(body: PublishStrategyRequest, request: Request):
+    """Publish/register current strategy code via strategy server API."""
+    _check_name(body.name)
+    trader_id = _get_trader_id(request)
+    org_id = _get_org_id(request)
+    if not org_id:
+        raise HTTPException(status_code=400, detail="X-Org-Id header is required for publish")
+
+    publish_url = f"{STRATEGY_SERVER_URL.rstrip('/')}{STRATEGY_SERVER_PUBLISH_PATH}"
+    file_name = body.name if body.name.endswith(".py") else f"{body.name}.py"
+    payload = {
+        "code": body.code,
+        "file_name": file_name,
+        "display_name": body.name,
+    }
+    upstream_headers = {
+        "X-Trader-Id": trader_id,
+        "X-Org-Id": org_id,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(publish_url, json=payload, headers=upstream_headers)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to reach strategy server: {exc}")
+
+    if response.status_code not in (200, 201):
+        detail = response.text[:2000] if response.text else f"HTTP {response.status_code}"
+        raise HTTPException(status_code=response.status_code, detail=f"Strategy server publish failed: {detail}")
+
+    try:
+        upstream = response.json()
+    except Exception:
+        upstream = {"raw": response.text[:2000] if response.text else ""}
+
+    return {
+        "status": "success",
+        "published": True,
+        "name": body.name,
+        "file_name": file_name,
+        "source": "strategy_server",
+        "org_id": org_id,
+        "trader_id": trader_id,
+        "upstream": upstream,
+    }
 
 
 @app.post("/run-strategy")

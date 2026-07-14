@@ -47,7 +47,10 @@ export default function CodePanel() {
   const setLoadedStrategyName = useStore((s) => s.setLoadedStrategyName)
 
   const [saving, setSaving] = useState(false)
+  const [publishing, setPublishing] = useState(false)
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle')
+  const [publishStatus, setPublishStatus] = useState<'idle' | 'ok' | 'error'>('idle')
+  const [publishedName, setPublishedName] = useState<string | null>(null)
   const [showCloseConfirm, setShowCloseConfirm] = useState(false)
 
   const isDirty = loadedStrategyName !== null && code !== savedCode
@@ -138,6 +141,43 @@ export default function CodePanel() {
     }
   }, [code, saving, inferDefaultName, setLoadedStrategyName, setSavedCode])
 
+  const publish = useCallback(async (): Promise<void> => {
+    if (!code || publishing) return
+
+    const defaultName = inferDefaultName()
+    const name = loadedStrategyName ?? defaultName
+    const validName = /^[A-Za-z0-9_]{1,128}$/.test(name) ? name : ''
+    const publishName = validName || window.prompt('Publish strategy name (without .py)', defaultName)?.trim().replace(/\.py$/i, '')
+    if (!publishName) return
+
+    setPublishing(true)
+    setPublishStatus('idle')
+    setPublishedName(null)
+    try {
+      const r = await fetch('/api/publish-strategy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getTraderHeaders() },
+        body: JSON.stringify({ name: publishName, code }),
+      })
+      if (!r.ok) {
+        setPublishStatus('error')
+        setTimeout(() => setPublishStatus('idle'), 4000)
+        return
+      }
+
+      const data = await r.json()
+      const name = typeof data?.name === 'string' ? data.name : publishName
+      setPublishedName(name)
+      setPublishStatus('ok')
+      setTimeout(() => setPublishStatus('idle'), 6000)
+    } catch {
+      setPublishStatus('error')
+      setTimeout(() => setPublishStatus('idle'), 4000)
+    } finally {
+      setPublishing(false)
+    }
+  }, [code, publishing, inferDefaultName, loadedStrategyName])
+
   const doClose = useCallback(() => {
     setCode('')
     setSavedCode('')
@@ -184,6 +224,14 @@ export default function CodePanel() {
         {saveStatus === 'error' && (
           <span style={{ fontSize: 10, color: 'var(--red)', fontFamily: 'var(--font-mono)' }}>✗ save failed</span>
         )}
+        {publishStatus === 'ok' && (
+          <span style={{ fontSize: 10, color: 'var(--green)', fontFamily: 'var(--font-mono)' }}>
+            ✓ published{publishedName ? `: ${publishedName}` : ''}
+          </span>
+        )}
+        {publishStatus === 'error' && (
+          <span style={{ fontSize: 10, color: 'var(--red)', fontFamily: 'var(--font-mono)' }}>✗ publish failed</span>
+        )}
 
         {/* Unsaved indicator */}
         {isDirty && saveStatus === 'idle' && (
@@ -215,18 +263,18 @@ export default function CodePanel() {
             {loadedStrategyName && (
               <button
                 onClick={save}
-                disabled={saving || !isDirty}
+                disabled={saving || publishing || !isDirty}
                 title={`Save back to ${loadedStrategyName}.py`}
                 style={{
                   padding: '2px 10px',
                   background: 'var(--surface-2)',
                   border: '1px solid var(--border)',
                   borderRadius: 3,
-                  color: saving || !isDirty ? 'var(--text-muted)' : 'var(--text-dim)',
+                  color: saving || publishing || !isDirty ? 'var(--text-muted)' : 'var(--text-dim)',
                   fontSize: 11,
                   fontFamily: 'var(--font-mono)',
                   fontWeight: 600,
-                  cursor: saving || !isDirty ? 'default' : 'pointer',
+                  cursor: saving || publishing || !isDirty ? 'default' : 'pointer',
                 }}
               >
                 {saving ? 'Saving…' : 'Save'}
@@ -234,19 +282,38 @@ export default function CodePanel() {
             )}
 
             <button
+              onClick={publish}
+              disabled={publishing || saving}
+              title="Publish current editor code to strategy server"
+              style={{
+                padding: '2px 10px',
+                background: 'var(--surface-2)',
+                border: '1px solid var(--border)',
+                borderRadius: 3,
+                color: publishing || saving ? 'var(--text-muted)' : 'var(--text-dim)',
+                fontSize: 11,
+                fontFamily: 'var(--font-mono)',
+                fontWeight: 600,
+                cursor: publishing || saving ? 'default' : 'pointer',
+              }}
+            >
+              {publishing ? 'Publishing…' : 'Publish'}
+            </button>
+
+            <button
               onClick={handleClose}
-              disabled={saving}
+              disabled={saving || publishing}
               title="Close strategy"
               style={{
                 padding: '2px 10px',
                 background: 'var(--surface-2)',
                 border: '1px solid var(--border)',
                 borderRadius: 3,
-                color: saving ? 'var(--text-muted)' : 'var(--text-dim)',
+                color: saving || publishing ? 'var(--text-muted)' : 'var(--text-dim)',
                 fontSize: 11,
                 fontFamily: 'var(--font-mono)',
                 fontWeight: 600,
-                cursor: saving ? 'default' : 'pointer',
+                cursor: saving || publishing ? 'default' : 'pointer',
               }}
             >
               Close
