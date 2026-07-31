@@ -62,6 +62,145 @@ Requirements:
 - All helper methods fully implemented
 - No placeholders or stub logic
 
+Before the imports, always add a module header section as a triple-quoted docstring. It must begin with a line stating that the strategy was created using Lumitec's Strategy Studio version X.
+
+The header section must also briefly explain:
+- the strategy logic and how it works
+- the key parameters and what they control
+- the market data it uses
+- the main risk controls and any special implementation notes
+
+Keep the header concise, factual, and specific to the strategy being generated.
+
+Use this hard starter template for every new strategy. Do not reorder the classes, omit the header, or skip the mandatory risk fields.
+
+```python
+"""
+Strategy created using Lumitec's Strategy Studio version X.
+
+Logic:
+<one concise paragraph describing how the strategy works>
+
+Key parameters:
+- <parameter name> - <what it controls>
+
+Market data:
+- <bars / quotes / trades used>
+
+Risk controls:
+- max_position: <value>
+- max_loss: <value>
+- max_active_orders_per_side: <value>
+- max_order_rate_per_second: <value>
+
+Important notes:
+- <any special implementation notes>
+"""
+
+import time
+from dataclasses import dataclass, replace, fields as dc_fields
+from lumitec.strategy.base import LumitecBaseStrategy
+from lumitec.strategy.config import LumitecStrategyConfig
+from lumitec.strategy.definitions import LegMode, StrategyMission, StrategyObjective
+
+
+class Config(LumitecStrategyConfig):
+    strategy_name: str = "MyStrategy"
+    file_name: str = "my_strategy.py"
+    max_position: int = 100
+    max_loss: float = 1000.0
+    max_active_orders_per_side: int = 1
+    max_order_rate_per_second: float = 1.0
+    # add strategy-specific config fields here
+
+
+@dataclass(frozen=True)
+class ConfigParams:
+    max_position: int = 100
+    max_loss: float = 1000.0
+    max_active_orders_per_side: int = 1
+    max_order_rate_per_second: float = 1.0
+    # add strategy-specific runtime parameters here
+
+    def validate(self) -> None:
+        if self.max_position <= 0:
+            raise ValueError("max_position must be > 0")
+        if self.max_loss <= 0:
+            raise ValueError("max_loss must be > 0")
+        if self.max_active_orders_per_side <= 0:
+            raise ValueError("max_active_orders_per_side must be > 0")
+        if self.max_order_rate_per_second <= 0:
+            raise ValueError("max_order_rate_per_second must be > 0")
+
+    @classmethod
+    def from_config(cls, cfg) -> "ConfigParams":
+        values = {f.name: getattr(cfg, f.name, f.default) for f in dc_fields(cls)}
+        params = cls(**values)
+        params.validate()
+        return params
+
+    def merged(self, updates: dict) -> "ConfigParams":
+        allowed = {f.name: f for f in dc_fields(self)}
+        coerced = {}
+        for key, value in updates.items():
+            if key not in allowed:
+                continue
+            field_type = allowed[key].type
+            if field_type in (int, "int"):
+                value = int(value)
+            elif field_type in (float, "float"):
+                value = float(value)
+            coerced[key] = value
+        new = replace(self, **coerced)
+        new.validate()
+        return new
+
+
+class MyStrategy(LumiteBaseStrategy):
+    mission = StrategyMission.INTRADAY_ARBITRAGE
+    objective = StrategyObjective.SIGNAL_DRIVEN
+    leg_mode = LegMode.CONTINUOUS
+    leg_schema = [{"label": "Leg A", "side": None, "fixed_side": False}]
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.params = ConfigParams.from_config(config)
+        self._last_tick_ts: float = 0.0
+        # add strategy state here
+
+    def set_oms_type(self, oms_type) -> None:
+        self._oms_type = oms_type
+
+    def on_start(self) -> None:
+        super().on_start()
+        # subscribe to market data here
+
+    def on_stop(self) -> None:
+        # teardown must mirror setup exactly
+        self.observe("Strategy stopped")
+
+    def on_order_rejected(self, event) -> None:
+        self.observe(f"Order rejected: {event.client_order_id.value}")
+
+    def on_order_cancelled(self, event) -> None:
+        self.observe(f"Order cancelled: {event.client_order_id.value}")
+
+    def apply_params(self, updates: dict) -> None:
+        with self._param_lock:
+            self.params = self.params.merged(updates)
+
+    def configure(self, **extras) -> None:
+        sp = extras.get("strategy_params")
+        if isinstance(sp, dict):
+            self.apply_params(sp)
+
+    @classmethod
+    def validate_legs(cls, legs: list) -> None:
+        pass
+
+    # add market-data handlers, order handlers, helper methods, and decision logic here
+```
+
 ---
 
 ## ABSOLUTELY FORBIDDEN
@@ -255,4 +394,15 @@ The code must be:
 - correct
 - ready to run
 
-Do not include explanations after the final code.
+## OUTPUT FORMAT (MANDATORY)
+
+Return only the final Python code.
+
+Do not include explanations, headings, or commentary after the final code.
+
+Preferred format:
+```python
+# final strategy code only
+```
+
+If you use fences, include exactly one Python fence and nothing else outside it.

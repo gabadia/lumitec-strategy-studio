@@ -34,8 +34,8 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY", "")
 ORCHESTRATOR_URL   = os.getenv("ORCHESTRATOR_URL",   "http://localhost:8000")
 SUPERVISOR_ID      = os.getenv("SUPERVISOR_ID",      "NUAM-DEV")
-VALIDATOR_URL      = os.getenv("VALIDATOR_URL",      "http://localhost:8003")  # dev profile — generation fix loop
-VALIDATOR_PROD_URL = os.getenv("VALIDATOR_PROD_URL", "http://localhost:8003")  # prod profile — submit gate
+VALIDATOR_URL      = os.getenv("VALIDATOR_URL",      "http://localhost:8003")  # strategy validator service
+VALIDATOR_PROD_URL = os.getenv("VALIDATOR_PROD_URL", "http://localhost:8003")  # strategy validator service (submit gate)
 
 # ─── Static capability manifest (replaces MCP tool discovery) ────────────────
 STUDIO_TOOLS = [
@@ -170,16 +170,130 @@ def _content_to_str(content: Any) -> str:
 
 
 def _extract_code_from_text(text: str) -> str | None:
-    """Return the last ```python...``` block found in text."""
-    matches = re.findall(r'```python\s*\n(.*?)```', text, re.DOTALL)
-    if matches:
-        return matches[-1].strip()
-    # Fallback: bare ``` block that looks like Python
-    matches = re.findall(r'```\s*\n(.*?)```', text, re.DOTALL)
-    for m in reversed(matches):
-        if any(kw in m for kw in ('class ', 'def ', 'import ')):
-            return m.strip()
+    """Return strategy code from Claude output.
+
+    Accepts fenced Python blocks, other fenced code blocks that parse as Python,
+    and finally plain code output with optional surrounding prose.
+    """
+
+    def _looks_like_python(src: str) -> bool:
+        try:
+            ast.parse(src)
+            return True
+        except SyntaxError:
+            return False
+
+    def _strip_fence(src: str) -> str:
+        src = src.strip()
+        if src.startswith("```"):
+            src = re.sub(r'^```[\w+-]*\s*\n?', '', src)
+            src = re.sub(r'\n?```\s*$', '', src)
+        return src.strip()
+
+    def _best_parseable_prefix(src: str) -> str | None:
+        src = src.strip()
+        if not src:
+            return None
+        if _looks_like_python(src):
+            return src
+
+        lines = src.splitlines()
+        if not lines:
+            return None
+
+        start_idx = 0
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if re.match(r'^(from\s+\w+|import\s+\w+|class\s+\w+|def\s+\w+|async\s+def\s+\w+|@|if\s|for\s|while\s|try\s*:|except\b|with\s|elif\b|else\b|return\b|pass\b|raise\b)', stripped):
+                start_idx = idx
+                break
+
+        for end_idx in range(len(lines), start_idx, -1):
+            candidate = "\n".join(lines[start_idx:end_idx]).strip()
+            if _looks_like_python(candidate):
+                return candidate
+        return None
+
+    # Prefer the last fenced block because Claude may show examples before the final answer.
+    fenced_blocks = re.findall(r'```(?:python|py|python3)?\s*\n(.*?)```', text, re.DOTALL | re.IGNORECASE)
+    for block in reversed(fenced_blocks):
+        candidate = _strip_fence(block)
+        parsed = _best_parseable_prefix(candidate)
+        if parsed:
+            return parsed
+        if any(kw in candidate for kw in ('class ', 'def ', 'import ')):
+            return candidate
+
+    # Fallback: any fenced block that parses as Python, even if unlabeled.
+    generic_blocks = re.findall(r'```\s*\n(.*?)```', text, re.DOTALL)
+    for block in reversed(generic_blocks):
+        candidate = _strip_fence(block)
+        parsed = _best_parseable_prefix(candidate)
+        if parsed:
+            return parsed
+
+    # Final fallback: the entire response may already be plain code with no fences.
+    candidate = text.strip()
+    candidate = _strip_fence(candidate)
+    parsed = _best_parseable_prefix(candidate)
+    if parsed:
+        return parsed
+
+    # As a last resort, try to extract from the first strategy-like class onward.
+    class_match = re.search(r'(^|\n)(class\s+\w+\s*\(LumitecBaseStrategy\).*?)$', text, re.DOTALL)
+    if class_match:
+        candidate = text[class_match.start(2):].strip()
+        parsed = _best_parseable_prefix(candidate)
+        if parsed:
+            return parsed
+
     return None
+
+
+_GENERATION_RISK_FIELDS = (
+    "max_position",
+    "max_loss",
+    "max_active_orders_per_side",
+    "max_order_rate_per_second",
+)
+
+
+def _generation_scaffold_issues(code: str) -> list[str]:
+    issues: list[str] = []
+    if not code.strip():
+        issues.append("strategy code is empty")
+        return issues
+
+    if "Strategy created using Lumitec's Strategy Studio version" not in code:
+        issues.append("missing module header with Strategy Studio version line")
+
+    config_match = re.search(r'^class\s+Config\(LumitecStrategyConfig\):', code, re.MULTILINE)
+    params_match = re.search(r'^@dataclass\(frozen=True\)\s*\nclass\s+ConfigParams:', code, re.MULTILINE)
+    strategy_match = re.search(r'^class\s+\w+\(LumitecBaseStrategy\):', code, re.MULTILINE)
+
+    if not config_match:
+        issues.append("missing top-level Config class")
+    if not params_match:
+        issues.append("missing ConfigParams dataclass")
+    if not strategy_match:
+        issues.append("missing strategy class")
+
+    if config_match and params_match and config_match.start() > params_match.start():
+        issues.append("Config must appear before ConfigParams")
+    if params_match and strategy_match and params_match.start() > strategy_match.start():
+        issues.append("ConfigParams must appear before the strategy class")
+
+    for field_name in _GENERATION_RISK_FIELDS:
+        if not re.search(rf'^\s*{field_name}\s*:\s*', code, re.MULTILINE):
+            issues.append(f"missing required risk field {field_name}")
+
+    for method_name in ("from_config", "merged", "validate"):
+        if f"def {method_name}(" not in code:
+            issues.append(f"ConfigParams missing {method_name}()")
+
+    return issues
 
 
 def _extract_metadata(code: str, intent: str = "") -> dict:
@@ -454,6 +568,7 @@ async def _phase_claude_generate(
     strategy_name: str | None,
     system_prompt: str,
     generate_model: str,
+    turn: int = 1,
 ) -> AsyncIterator[dict]:
     """
     Stream any configured model to generate strategy code.
@@ -477,8 +592,6 @@ async def _phase_claude_generate(
         )
 
     full_text = ""
-    turn = 1
-
     yield {"type": "thinking", "turn": turn, "model": generate_model}
 
     try:
@@ -502,6 +615,7 @@ async def _phase_openai_validate(
     validation_system: str,
     turn_offset: int,
     fix_model: str,
+    validation_profile: str = "prod",
 ) -> AsyncIterator[dict]:
     """
     Stateless validation loop.
@@ -531,7 +645,7 @@ async def _phase_openai_validate(
                 async with httpx.AsyncClient(timeout=30.0) as _vc:
                     _vr = await _vc.post(
                         f"{VALIDATOR_URL}/validate",
-                        json={"code": code, "correlation_id": f"studio-val-{attempt}"},
+                        json={"code": code, "correlation_id": f"studio-val-{attempt}", "profile": "development" if validation_profile in ("dev", "research") else "production"},
                     )
                     _vr.raise_for_status()
                     data = _vr.json()
@@ -767,6 +881,7 @@ async def _phase_submit(
     uid8: str,
     turn: int,
     strategy_params: dict | None = None,
+    validation_profile: str = "prod",
 ) -> AsyncIterator[dict]:
     """
     Constructs the submit payload from extracted metadata and calls submit_strategy directly.
@@ -803,7 +918,7 @@ async def _phase_submit(
         async with httpx.AsyncClient(timeout=30.0) as _vc:
             _gr = await _vc.post(
                 f"{VALIDATOR_PROD_URL}/validate",
-                json={"code": code, "correlation_id": f"studio-submit-{uid8}"},
+                json={"code": code, "correlation_id": f"studio-submit-{uid8}", "profile": "development" if validation_profile in ("dev", "research") else "production"},
             )
             _gr.raise_for_status()
             gate_data = _gr.json()
@@ -866,6 +981,7 @@ async def _phase_submit(
         ]),
         "start_time": start_iso,
         "end_time": end_iso,
+        "validation_profile": "development" if validation_profile in ("dev", "research") else "production",
     }
 
     # Emit tool_call so App.tsx updates step indicator and code panel
@@ -988,6 +1104,7 @@ async def run_strategy_workflow(
     generate_model: str | None = None,
     validate_model: str | None = None,
     monitor_model: str | None = None,
+    validation_profile: str = "prod",
 ) -> AsyncIterator[dict]:
     """
     Main entry point. Yields SSE-ready dicts.
@@ -1027,7 +1144,7 @@ async def run_strategy_workflow(
         # Skip when existing_code but no intent → pass code straight to validation as-is
         if not existing_code or intent.strip():
             async for event in _phase_claude_generate(
-                intent, existing_code, strategy_name, claude_system, gen_model
+                intent, existing_code, strategy_name, claude_system, gen_model, turn=1
             ):
                 if event["type"] == "_code_ready":
                     code        = event["code"]
@@ -1040,13 +1157,50 @@ async def run_strategy_workflow(
             yield {"type": "error", "message": "Failed to extract strategy code from Claude output"}
             return
 
+        scaffold_issues = _generation_scaffold_issues(code)
+        if scaffold_issues:
+            repair_intent = (
+                "The previous draft is missing required strategy scaffold elements. "
+                "Rewrite the complete file so it includes the exact required header, "
+                "top-level Config class, top-level ConfigParams dataclass, and all mandatory risk fields. "
+                "Preserve the strategy logic where possible, but return the full corrected file. "
+                f"Missing items: {'; '.join(scaffold_issues)}"
+            )
+            repaired_code = ""
+            async for event in _phase_claude_generate(
+                repair_intent, code, strategy_name, claude_system, gen_model, turn=2
+            ):
+                if event["type"] == "_code_ready":
+                    repaired_code = event["code"]
+                    intent_text = event["intent_text"]
+                    claude_turn = 2
+                else:
+                    yield event
+
+            if repaired_code:
+                repaired_issues = _generation_scaffold_issues(repaired_code)
+                if repaired_issues:
+                    yield {
+                        "type": "error",
+                        "message": (
+                            "Generated strategy is missing required scaffold after repair: "
+                            + "; ".join(repaired_issues)
+                        ),
+                    }
+                    return
+                code = repaired_code
+            else:
+                yield {"type": "error", "message": "Failed to repair missing strategy scaffold"}
+                return
+
         metadata = _extract_metadata(code, intent)
 
         # ── Phase 2: Validate + fix ────────────────────────────────
         validated = False
         last_error = ""
         async for event in _phase_openai_validate(
-            code, validation_system, turn_offset=claude_turn, fix_model=val_model
+            code, validation_system, turn_offset=claude_turn, fix_model=val_model,
+            validation_profile=validation_profile,
         ):
             if event["type"] == "_validation_done":
                 validated  = event["passed"]
@@ -1123,6 +1277,7 @@ async def run_resubmit_workflow(
     monitor_model: str | None = None,
     start_time: str | None = None,
     end_time: str | None = None,
+    validation_profile: str = "prod",
 ) -> AsyncIterator[dict]:
     """
     Re-submit flow: runs validate_strategy via MCP first (blocks on failure),
@@ -1174,7 +1329,7 @@ async def run_resubmit_workflow(
             async with httpx.AsyncClient(timeout=30.0) as _vc:
                 _vr = await _vc.post(
                     f"{VALIDATOR_PROD_URL}/validate",
-                    json={"code": code, "correlation_id": uid8},
+                    json={"code": code, "correlation_id": uid8, "profile": "development" if validation_profile in ("dev", "research") else "production"},
                 )
                 _vr.raise_for_status()
                 val_data = _vr.json()
@@ -1227,6 +1382,7 @@ async def run_resubmit_workflow(
         async for event in _phase_submit(
             code, metadata, start_iso, end_iso, uid8, turn=1,
             strategy_params=strategy_params,
+            validation_profile=validation_profile,
         ):
             if event["type"] == "_submit_done":
                 strategy_id = event["strategy_id"] if event["success"] else None

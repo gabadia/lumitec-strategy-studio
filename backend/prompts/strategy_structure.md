@@ -2,11 +2,14 @@
 ```python
 import time
 from dataclasses import dataclass, replace, fields as dc_fields
-from threading import RLock
 from lumitec.strategy.base import LumitecBaseStrategy
 from lumitec.strategy.config import LumitecStrategyConfig
 from lumitec.strategy.definitions import LegMode, StrategyMission, StrategyObjective
 ```
+
+Do not import or instantiate `RLock` in generated strategies. The Lumitec base strategy already provides the synchronization needed for parameter updates.
+
+Generated strategy files must begin with a module docstring header before imports. The first line must state that the strategy was created using Lumitec's Strategy Studio version X, followed by a short summary of the strategy logic, key parameters, market data usage, and notable risk or implementation details.
 
 Every strategy must extend `LumitecBaseStrategy` and declare these class attributes:
 ```python
@@ -124,7 +127,6 @@ class ConfigParams:
 def __init__(self, config: Config):
     super().__init__(config)
     self.params = ConfigParams.from_config(config)   # load params at construction
-    self._param_lock = RLock()                       # MUST be here — not in on_start
     # ... strategy-specific state variables
 ```
 
@@ -132,7 +134,6 @@ def __init__(self, config: Config):
 ```python
 def on_start(self) -> None:
     super().on_start()
-    self._param_lock = RLock()   # WRONG: configure() runs before on_start()
 ```
 
 ---
@@ -169,7 +170,7 @@ If a strategy uses bars and/or quotes, subscriptions must be set in `on_start` a
 ### apply_params + configure — required for hot parameter updates
 ```python
 def apply_params(self, updates: dict) -> None:
-    with self._param_lock:          # RLock — required
+    with self._param_lock:
         self.params = self.params.merged(updates)
 
 def configure(self, **extras) -> None:
@@ -494,7 +495,7 @@ Before publishing, all 19 of these must be present in your file:
 | 2 | `validate()` method in ConfigParams |
 | 3 | `merged()` method in ConfigParams |
 | 4 | `from_config()` classmethod in ConfigParams |
-| 5 | `apply_params()` with `RLock` |
+| 5 | `apply_params()` using the base strategy lock |
 | 6 | `configure()` accepting `strategy_params` dict |
 | 7 | `on_stop()` |
 | 8 | `on_order_rejected()` |
@@ -506,7 +507,7 @@ Before publishing, all 19 of these must be present in your file:
 | 14 | `validate_legs()` classmethod enforcing leg count and side |
 | 15 | `isPaused()` guard at top of every market data handler |
 | 16 | `on_pause()` / `on_resume()` hooks (not `pause()`/`resume()`) |
-| 17 | `self.params` and `self._param_lock = RLock()` initialised in `__init__`, not `on_start` |
+| 17 | `self.params` initialised in `__init__` |
 | 18 | `tick_throttle_interval` in `ConfigParams`; `self._last_tick_ts = 0.0` in `__init__`; timestamp throttle guard in every tick handler that calls observe/decide/act |
 | 19 | Symmetric market-data lifecycle: if quotes/bars are subscribed in `on_start`, matching quote/bar unsubscriptions must appear in `on_stop` |
 
@@ -517,4 +518,128 @@ Forbidden imports (publish will be rejected if found):
 
 ## Template
 
-See `examples/pairs_template.py` for a complete working skeleton with all required patterns.
+Use this exact starter skeleton in every new strategy. Fill in the placeholders, but keep the class order, header block, and mandatory risk fields intact.
+
+```python
+"""
+Strategy created using Lumitec's Strategy Studio version X.
+
+Logic:
+<one concise paragraph describing how the strategy works>
+
+Key parameters:
+- <parameter name> - <what it controls>
+
+Market data:
+- <bars / quotes / trades used>
+
+Risk controls:
+- max_position: <value>
+- max_loss: <value>
+- max_active_orders_per_side: <value>
+- max_order_rate_per_second: <value>
+
+Important notes:
+- <any special implementation notes>
+"""
+
+import time
+from dataclasses import dataclass, replace, fields as dc_fields
+from lumitec.strategy.base import LumitecBaseStrategy
+from lumitec.strategy.config import LumitecStrategyConfig
+from lumitec.strategy.definitions import LegMode, StrategyMission, StrategyObjective
+
+
+class Config(LumitecStrategyConfig):
+    strategy_name: str = "MyStrategy"
+    file_name: str = "my_strategy.py"
+    max_position: int = 100
+    max_loss: float = 1000.0
+    max_active_orders_per_side: int = 1
+    max_order_rate_per_second: float = 1.0
+
+
+@dataclass(frozen=True)
+class ConfigParams:
+    max_position: int = 100
+    max_loss: float = 1000.0
+    max_active_orders_per_side: int = 1
+    max_order_rate_per_second: float = 1.0
+
+    def validate(self) -> None:
+        if self.max_position <= 0:
+            raise ValueError("max_position must be > 0")
+        if self.max_loss <= 0:
+            raise ValueError("max_loss must be > 0")
+        if self.max_active_orders_per_side <= 0:
+            raise ValueError("max_active_orders_per_side must be > 0")
+        if self.max_order_rate_per_second <= 0:
+            raise ValueError("max_order_rate_per_second must be > 0")
+
+    @classmethod
+    def from_config(cls, cfg) -> "ConfigParams":
+        values = {f.name: getattr(cfg, f.name, f.default) for f in dc_fields(cls)}
+        params = cls(**values)
+        params.validate()
+        return params
+
+    def merged(self, updates: dict) -> "ConfigParams":
+        allowed = {f.name: f for f in dc_fields(self)}
+        coerced = {}
+        for key, value in updates.items():
+            if key not in allowed:
+                continue
+            field_type = allowed[key].type
+            if field_type in (int, "int"):
+                value = int(value)
+            elif field_type in (float, "float"):
+                value = float(value)
+            coerced[key] = value
+        new = replace(self, **coerced)
+        new.validate()
+        return new
+
+
+class MyStrategy(LumitecBaseStrategy):
+    mission = StrategyMission.INTRADAY_ARBITRAGE
+    objective = StrategyObjective.SIGNAL_DRIVEN
+    leg_mode = LegMode.CONTINUOUS
+    leg_schema = [{"label": "Leg A", "side": None, "fixed_side": False}]
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.params = ConfigParams.from_config(config)
+        self._last_tick_ts: float = 0.0
+
+    def set_oms_type(self, oms_type) -> None:
+        self._oms_type = oms_type
+
+    def on_start(self) -> None:
+        super().on_start()
+        # subscribe to market data here
+
+    def on_stop(self) -> None:
+        # teardown must mirror setup exactly
+        self.observe("Strategy stopped")
+
+    def on_order_rejected(self, event) -> None:
+        self.observe(f"Order rejected: {event.client_order_id.value}")
+
+    def on_order_cancelled(self, event) -> None:
+        self.observe(f"Order cancelled: {event.client_order_id.value}")
+
+    def apply_params(self, updates: dict) -> None:
+        with self._param_lock:
+            self.params = self.params.merged(updates)
+
+    def configure(self, **extras) -> None:
+        sp = extras.get("strategy_params")
+        if isinstance(sp, dict):
+            self.apply_params(sp)
+
+    @classmethod
+    def validate_legs(cls, legs: list) -> None:
+        pass
+
+    # add market-data handlers, order handlers, helper methods, and decision logic here
+```
