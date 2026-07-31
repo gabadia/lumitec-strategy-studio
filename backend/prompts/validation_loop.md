@@ -39,13 +39,14 @@ For market-data lifecycle failures, apply these exact fixes:
 ```python
 import time
 from dataclasses import dataclass, replace, fields as dc_fields
-from threading import RLock
 from nautilus_trader.model.enums import OrderSide, TimeInForce, BarAggregation, PriceType
 from nautilus_trader.model.objects import Price
 from lumitec.strategy.base import LumitecBaseStrategy
 from lumitec.strategy.config import LumitecStrategyConfig
 from lumitec.strategy.definitions import LegMode, StrategyMission, StrategyObjective
 ```
+
+Do not import or instantiate `RLock` in the strategy. The base strategy already provides the lock used for parameter updates.
 
 ---
 
@@ -60,7 +61,7 @@ All 16 patterns must be present. If the error references one of these, add the m
 | 2 | `validate()` in ConfigParams | Add method that raises `ValueError` on bad params |
 | 3 | `merged()` in ConfigParams | Add method returning `replace(self, **coerced)` |
 | 4 | `from_config()` in ConfigParams | Add classmethod reading fields from cfg |
-| 5 | `apply_params()` with `RLock` | Add method using `with self._param_lock` |
+| 5 | `apply_params()` using the base strategy lock | Add method using `with self._param_lock` |
 | 6 | `configure()` accepting `strategy_params` dict | Add method calling `apply_params` |
 | 7 | `on_stop()` | Add `self.observe("Strategy stopped")` |
 | 8 | `on_order_rejected()` | Add `self.observe(f"Order rejected: {event.client_order_id.value}")` |
@@ -72,7 +73,7 @@ All 16 patterns must be present. If the error references one of these, add the m
 | 14 | `validate_legs()` classmethod | Add enforcing leg count and side |
 | 15 | `isPaused()` guard | Add `if self.isPaused(): return` at top of every market data handler |
 | 16 | `on_pause()` / `on_resume()` | Add both hooks |
-| 17 | `_param_lock` in `__init__` | Add `self._param_lock = RLock()` in `__init__` — NOT in `on_start` |
+| 17 | `self.params` in `__init__` | Initialize params in `__init__` |
 | 18 | `self.observe()` in market data handlers | Add logging signal values — e.g. `self.observe("bar", context={"price": float(bar.close)})` |
 | 19 | `self.decide()` before entry/exit | Add before every order decision — e.g. `self.decide("entry signal", context={"reason": "..."})` |
 | 20 | `self.act()` after order actions | Add after every submit/cancel/stop — e.g. `self.act("submitted BUY", context={"qty": qty})` |

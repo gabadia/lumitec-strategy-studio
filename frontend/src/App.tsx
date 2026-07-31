@@ -21,12 +21,14 @@ export interface ModelSettings {
   generateModel: string
   validateModel: string
   monitorModel: string
+  validationProfile: string
 }
 
 const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   generateModel: 'claude-sonnet-4-6',
   validateModel: 'gpt-4o-mini',
   monitorModel:  'gpt-4o-mini',
+  validationProfile: 'prod',
 }
 
 interface StudioState {
@@ -120,6 +122,7 @@ async function streamResubmit(
   monitorModel?: string,
   startTime?: string,
   endTime?: string,
+  validationProfile?: string,
 ) {
   const response = await fetch('/api/resubmit-strategy', {
     method: 'POST',
@@ -131,6 +134,7 @@ async function streamResubmit(
       monitor_model: monitorModel,
       ...(startTime ? { start_time: startTime } : {}),
       ...(endTime   ? { end_time:   endTime   } : {}),
+      ...(validationProfile ? { validation_profile: validationProfile } : {}),
     }),
     signal,
   })
@@ -175,6 +179,7 @@ async function streamWorkflow(
         generate_model: modelSettings.generateModel,
         validate_model: modelSettings.validateModel,
         monitor_model:  modelSettings.monitorModel,
+        validation_profile: modelSettings.validationProfile,
       } : {}),
     }),
     signal,
@@ -464,11 +469,9 @@ export default function App() {
 
   const handleStop = useCallback(() => {
     abortRef.current?.abort()
-    // Close SSE event stream
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close()
-      eventSourceRef.current = null
-    }
+    // Do NOT close the EventSource here — the relay must stay alive to receive
+    // strategy.stopped from the gateway. The terminal event handler in flushBuffer
+    // will close the EventSource once strategy.stopped arrives.
     setRunning(false)
     setStep('done')   // keep 'done' so the post-run panel stays visible
     const { activeStrategyId } = useStore.getState()
@@ -563,7 +566,7 @@ export default function App() {
     }
 
     try {
-      await streamResubmit(currentCode, legs, strategyParams, handleEvent, abortRef.current.signal, undefined, startTime, endTime)
+      await streamResubmit(currentCode, legs, strategyParams, handleEvent, abortRef.current.signal, undefined, startTime, endTime, modelSettings.validationProfile)
     } catch (err: unknown) {
       if (err instanceof Error && err.name !== 'AbortError') {
         setStep('error')
@@ -572,7 +575,7 @@ export default function App() {
     } finally {
       if (!useStore.getState().activeStrategyId) setRunning(false)
     }
-  }, [reset, setRunning, setStep, setCode, setActiveStrategyId, openStrategyEventSource, addActivity, updateLastActivity])
+  }, [reset, setRunning, setStep, setCode, setActiveStrategyId, openStrategyEventSource, addActivity, updateLastActivity, modelSettings])
 
   const trader = getTrader()
   const [showClearRuns, setShowClearRuns] = useState(false)

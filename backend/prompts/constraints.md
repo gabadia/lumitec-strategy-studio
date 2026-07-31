@@ -48,13 +48,14 @@ The following imports will cause the supervisor to reject the strategy at load t
 
 ```python
 from dataclasses import dataclass, replace, fields as dc_fields
-from threading import RLock
 from nautilus_trader.model.enums import OrderSide, TimeInForce, BarAggregation, PriceType
 from nautilus_trader.model.objects import Price
 from lumitec.strategy.base import LumitecBaseStrategy
 from lumitec.strategy.config import LumitecStrategyConfig
 from lumitec.strategy.definitions import LegMode, StrategyMission, StrategyObjective
 ```
+
+Do not import or instantiate `RLock` in generated strategies. The base strategy already provides the synchronization primitive used by `apply_params()`.
 
 ---
 
@@ -67,7 +68,7 @@ from lumitec.strategy.definitions import LegMode, StrategyMission, StrategyObjec
 | 2 | `validate()` method in ConfigParams |
 | 3 | `merged()` method in ConfigParams |
 | 4 | `from_config()` classmethod in ConfigParams |
-| 5 | `apply_params()` with `RLock` |
+| 5 | `apply_params()` using the base strategy lock |
 | 6 | `configure()` accepting `strategy_params` dict |
 | 7 | `on_stop()` |
 | 8 | `on_order_rejected()` |
@@ -79,7 +80,7 @@ from lumitec.strategy.definitions import LegMode, StrategyMission, StrategyObjec
 | 14 | `validate_legs()` classmethod enforcing leg count and side |
 | 15 | `isPaused()` guard at top of every market data handler |
 | 16 | `on_pause()` / `on_resume()` hooks |
-| 17 | `self.params` and `self._param_lock = RLock()` initialised in `__init__`, not `on_start` |
+| 17 | `self.params` initialised in `__init__` |
 | 18 | `self.observe()` calls in every market data handler logging signal values |
 | 19 | `self.decide()` calls before every entry and exit decision |
 | 20 | `self.act()` calls after every order submission, cancellation, and forced_stop |

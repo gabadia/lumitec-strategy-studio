@@ -327,6 +327,28 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
               </select>
             </label>
           ))}
+
+          {/* Validation profile selector */}
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-dim)', marginLeft: 8, paddingLeft: 8, borderLeft: '1px solid var(--border)' }}>
+            <span style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.05em' }}>Profile</span>
+            <select
+              value={modelSettings.validationProfile}
+              onChange={(e) => onModelSettingsChange({ ...modelSettings, validationProfile: e.target.value })}
+              disabled={isRunning}
+              style={{
+                background: modelSettings.validationProfile !== 'prod' ? 'var(--surface-3, #2a2a1a)' : 'var(--surface)',
+                border: `1px solid ${modelSettings.validationProfile !== 'prod' ? 'var(--warn, #b8860b)' : 'var(--border)'}`,
+                borderRadius: 4,
+                color: modelSettings.validationProfile !== 'prod' ? 'var(--warn, #d4a017)' : 'var(--text)',
+                padding: '2px 6px', fontSize: 11,
+                fontFamily: 'var(--font-mono)', cursor: 'pointer',
+              }}
+            >
+              <option value="prod">prod</option>
+              <option value="dev">dev</option>
+              <option value="research">research</option>
+            </select>
+          </label>
         </div>
       )}
 
