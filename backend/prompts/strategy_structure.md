@@ -195,7 +195,7 @@ Called by the supervisor controller before instantiation. Raise `ValueError` wit
 - If `leg_schema` has `"side": None, "fixed_side": False` → `validate_legs` must NOT check the side value
 - Never declare a fixed side in `leg_schema` and then require user-selectable in `validate_legs`, or vice versa
 
-### on_stop, on_order_rejected, on_order_cancelled — must be present
+### on_stop, on_order_rejected, on_order_canceled — must be present
 ```python
 def on_stop(self) -> None:
     # teardown must mirror setup exactly
@@ -215,8 +215,8 @@ def on_stop(self) -> None:
 def on_order_rejected(self, event) -> None:
     self.observe(f"Order rejected: {event.client_order_id.value}")
 
-def on_order_cancelled(self, event) -> None:
-    self.observe(f"Order cancelled: {event.client_order_id.value}")
+def on_order_canceled(self, event) -> None:
+    self.observe(f"Order canceled: {event.client_order_id.value}")
 ```
 
 ---
@@ -499,7 +499,7 @@ Before publishing, all 19 of these must be present in your file:
 | 6 | `configure()` accepting `strategy_params` dict |
 | 7 | `on_stop()` |
 | 8 | `on_order_rejected()` |
-| 9 | `on_order_cancelled()` |
+| 9 | `on_order_canceled()` |
 | 10 | `set_oms_type()` |
 | 11 | Rebuild signal data in `apply_params()` when thresholds change |
 | 12 | Guard `on_order_filled` for unknown `leg_id` |
@@ -625,8 +625,8 @@ class MyStrategy(LumitecBaseStrategy):
     def on_order_rejected(self, event) -> None:
         self.observe(f"Order rejected: {event.client_order_id.value}")
 
-    def on_order_cancelled(self, event) -> None:
-        self.observe(f"Order cancelled: {event.client_order_id.value}")
+    def on_order_canceled(self, event) -> None:
+        self.observe(f"Order canceled: {event.client_order_id.value}")
 
     def apply_params(self, updates: dict) -> None:
         with self._param_lock:

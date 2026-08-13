@@ -1,5 +1,6 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import Editor from '@monaco-editor/react'
+import type * as MonacoType from 'monaco-editor'
 import { useStore } from '../App'
 import { getTraderHeaders } from '../auth'
 
@@ -45,6 +46,8 @@ export default function CodePanel() {
   const setCode = useStore((s) => s.setCode)
   const setSavedCode = useStore((s) => s.setSavedCode)
   const setLoadedStrategyName = useStore((s) => s.setLoadedStrategyName)
+
+  const editorRef = useRef<MonacoType.editor.IStandaloneCodeEditor | null>(null)
 
   const [saving, setSaving] = useState(false)
   const [publishing, setPublishing] = useState(false)
@@ -340,14 +343,17 @@ export default function CodePanel() {
 
       {/* Empty state hint */}
       {!code && !isRunning && (
-        <div style={{
-          position: 'absolute', top: '50%', left: '50%',
-          transform: 'translate(-50%, -50%)',
-          color: 'var(--text-muted)', fontSize: 12,
-          pointerEvents: 'none', textAlign: 'center', lineHeight: 1.8,
-        }}>
-          Paste or type your strategy code here
-          {isRunning && <div style={{ color: 'var(--accent)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>Claude is writing…</div>}
+        <div
+          onClick={() => editorRef.current?.focus()}
+          style={{
+            position: 'absolute', top: '50%', left: '50%',
+            transform: 'translate(-50%, -50%)',
+            color: 'var(--text-muted)', fontSize: 12,
+            textAlign: 'center', lineHeight: 1.8,
+            cursor: 'text',
+          }}
+        >
+          Click here or use CODE mode to paste your strategy
         </div>
       )}
 
@@ -356,6 +362,7 @@ export default function CodePanel() {
         language="python"
         value={code}
         theme="vs-dark"
+        onMount={(editor) => { editorRef.current = editor }}
         onChange={(val) => { if (!isRunning && val !== undefined) setCode(val) }}
         options={{
           readOnly: isRunning,

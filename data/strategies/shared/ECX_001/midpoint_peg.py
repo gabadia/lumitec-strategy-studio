@@ -182,7 +182,7 @@ class MidpointPeg(LumitecBaseStrategy):
             move_cents = abs(mid - self._last_peg_price) * 100
             if move_cents < self.params.min_reprice_move_cents:
                 return
-            # Cancel existing order; on_order_cancelled will re-peg
+            # Cancel existing order; on_order_canceled will re-peg
             self._pending_reprice_mid = mid
             self._cancel_pending = True
             self.cancelOrdersForSymbol(self.symbol_a)
@@ -246,7 +246,7 @@ class MidpointPeg(LumitecBaseStrategy):
     def _trigger_aggression(self, bid: float, ask: float) -> None:
         self._aggressive = True
         if self._active_order_id is not None:
-            # Cancel current peg first; on_order_cancelled will submit aggressive
+            # Cancel current peg first; on_order_canceled will submit aggressive
             self._cancel_pending = True
             self.cancelOrdersForSymbol(self.symbol_a)
         else:
@@ -294,7 +294,7 @@ class MidpointPeg(LumitecBaseStrategy):
         # else: partial fill for the active order — leave it working at the exchange.
         # It will continue filling; reprice only fires when mid moves enough.
 
-    def on_order_cancelled(self, event) -> None:
+    def on_order_canceled(self, event) -> None:
         self._active_order_id = None
         was_our_cancel = self._cancel_pending
         self._cancel_pending = False

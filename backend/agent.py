@@ -121,6 +121,40 @@ def _load_generation_system() -> str:
     return "\n\n---\n\n".join(parts)
 
 
+def _load_editing_system() -> str:
+    """Phase 1 — Editing: structural rules + targeted-edit instructions.
+    Used on the Fix Code path (existing_code + intent). No full generation process."""
+    structure = _read_file(STRATEGY_STRUCTURE_PROMPT_PATH)
+    base = structure if structure else "You are a Lumitec strategy developer."
+    return (
+        base
+        + "\n\n---\n\n"
+        "## TARGETED EDIT MODE — SEARCH/REPLACE OUTPUT\n\n"
+        "You are making a surgical edit to an existing strategy. Rules:\n\n"
+        "1. Apply ONLY the specific change described in the trader's request.\n"
+        "2. Do NOT redesign, restructure, rename classes, or regenerate the strategy from scratch.\n"
+        "3. Preserve ALL existing logic, class names, method signatures, imports, parameters, "
+        "and risk controls — unless explicitly asked to change them.\n"
+        "4. Do NOT add new features, refactor, or improve anything not mentioned in the request.\n\n"
+        "OUTPUT FORMAT — use SEARCH/REPLACE blocks, NOT the full file:\n\n"
+        "<<<<<<< SEARCH\n"
+        "<exact lines from the existing strategy to be replaced>\n"
+        "=======\n"
+        "<new replacement lines>\n"
+        ">>>>>>> REPLACE\n\n"
+        "Rules for blocks:\n"
+        "- Use one block per contiguous changed section.\n"
+        "- The SEARCH section MUST be an EXACT copy of the lines from the existing strategy "
+        "(same indentation, same spacing, same content).\n"
+        "- Multiple blocks are allowed for changes in different parts of the file.\n"
+        "- Do NOT output the entire file. Do NOT wrap output in ```python fences.\n"
+        "- To add or change an import, use a separate block covering only the import lines.\n\n"
+        "FALLBACK: If the change touches more than 8 distinct sections of the file, "
+        "OR if you are unsure about the exact existing text, "
+        "return the complete modified file in a single ```python block instead of using blocks."
+    )
+
+
 def _load_fixing_system() -> str:
     """Phase 2 — Fixing: validation loop instructions only."""
     return _read_file(
@@ -213,7 +247,13 @@ def _extract_code_from_text(text: str) -> str | None:
         for end_idx in range(len(lines), start_idx, -1):
             candidate = "\n".join(lines[start_idx:end_idx]).strip()
             if _looks_like_python(candidate):
-                return candidate
+                # Refuse to strip more than 15% of the lines.
+                # A larger drop almost always means mid-file truncation rather than
+                # trailing prose; silently returning a truncated strategy would let
+                # the validator pass broken code without any warning.
+                if end_idx >= len(lines) * 0.85:
+                    return candidate
+                return None  # looks truncated — let the caller fall back safely
         return None
 
     # Prefer the last fenced block because Claude may show examples before the final answer.
@@ -250,6 +290,89 @@ def _extract_code_from_text(text: str) -> str | None:
             return parsed
 
     return None
+
+
+# ── SEARCH/REPLACE diff engine ────────────────────────────────────────────────
+# Regex matches the 7-char marker format used in the editing system prompt.
+_SR_BLOCK_RE = re.compile(
+    r'<{7}\s*SEARCH\r?\n(.*?)\r?\n={7}\r?\n(.*?)\r?\n>{7}\s*REPLACE',
+    re.DOTALL,
+)
+
+
+def _apply_search_replace(original: str, llm_output: str) -> tuple[str, int, int]:
+    """Apply SEARCH/REPLACE blocks from *llm_output* onto *original*.
+
+    Each block has the form::
+
+        <<<<<<< SEARCH
+        <exact lines to find>
+        =======
+        <replacement lines>
+        >>>>>>> REPLACE
+
+    Matching strategy (tried in order for each block):
+    1. Exact string match.
+    2. Trailing-whitespace-normalised match — strips trailing spaces/tabs from
+       every line before comparing, then splices the result back at the correct
+       line range.  This handles the common case where the LLM adds or removes
+       trailing whitespace in its SEARCH section.
+
+    All blocks are attempted regardless of individual failures so the caller
+    gets an accurate count.  The result accumulates only the blocks that
+    matched; if any block fails the caller should fall back to full-file
+    extraction and discard the partial result.
+
+    Returns ``(result_code, n_applied, n_total)``.
+    - n_total == 0  → no blocks present → fall back to full-file extraction.
+    - n_applied == n_total → full success.
+    - n_applied <  n_total → partial; caller should fall back.
+    """
+    blocks = _SR_BLOCK_RE.findall(llm_output)
+    if not blocks:
+        return original, 0, 0
+
+    def _norm(s: str) -> str:
+        """Strip trailing whitespace per line; normalise line endings to LF."""
+        return "\n".join(line.rstrip() for line in s.splitlines())
+
+    result = original
+    applied = 0
+    for search_raw, replace_raw in blocks:
+        # Strip only leading/trailing blank lines; preserve internal indentation.
+        search_text = search_raw.strip("\n").strip("\r")
+        replace_text = replace_raw.strip("\n").strip("\r")
+
+        # ── 1. Exact match ──────────────────────────────────────────────────
+        if search_text in result:
+            result = result.replace(search_text, replace_text, 1)
+            applied += 1
+            continue
+
+        # ── 2. Trailing-whitespace-normalised match ─────────────────────────
+        norm_search = _norm(search_text)
+        norm_result = _norm(result)
+        if norm_search and norm_search in norm_result:
+            idx = norm_result.index(norm_search)
+            prefix_lines = norm_result[:idx].count("\n")
+            search_line_count = norm_search.count("\n") + 1
+            src_lines = result.splitlines(keepends=False)
+            before_parts = src_lines[:prefix_lines]
+            after_parts  = src_lines[prefix_lines + search_line_count:]
+            segments: list[str] = []
+            if before_parts:
+                segments.append("\n".join(before_parts))
+            segments.append(replace_text)
+            if after_parts:
+                segments.append("\n".join(after_parts))
+            result = "\n".join(segments)
+            applied += 1
+            continue
+
+        # ── No match — continue to try remaining blocks ─────────────────────
+        # (We still attempt the rest so n_applied reflects the true count.)
+
+    return result, applied, len(blocks)
 
 
 _GENERATION_RISK_FIELDS = (
@@ -480,15 +603,35 @@ def _check_market_data_lifecycle(code: str) -> list[str]:
 
 # ─── Unified LLM helpers ─────────────────────────────────────────────────────
 
-async def _stream_text(model: str, system: str, user: str, max_tokens: int = 16000) -> AsyncIterator[str]:
-    """Yield text deltas from either Anthropic or OpenAI."""
+async def _stream_text(model: str, system: str, user: str, max_tokens: int = 16000, extended_output: bool = False) -> AsyncIterator[str]:
+    """Yield text deltas from either Anthropic or OpenAI.
+
+    extended_output=True adds the Anthropic 'output-128k-2025-02-19' beta to raise
+    the output ceiling to ~64 K tokens for generation of large strategy files.
+    Falls back silently to standard mode if the beta is rejected by the API.
+    """
     if _provider(model) == "anthropic":
-        async with _anthropic.messages.stream(
-            model=model, max_tokens=max_tokens, system=system,
+        kwargs: dict = dict(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
             messages=[{"role": "user", "content": user}],
-        ) as s:
-            async for delta in s.text_stream:
-                yield delta
+        )
+        if extended_output:
+            kwargs["betas"] = ["output-128k-2025-02-19"]
+        try:
+            async with _anthropic.messages.stream(**kwargs) as s:
+                async for delta in s.text_stream:
+                    yield delta
+        except Exception as exc:
+            if extended_output and ("beta" in str(exc).lower() or "betas" in str(exc).lower() or "400" in str(exc)):
+                # Beta not available for this account/model — retry without it
+                kwargs.pop("betas", None)
+                async with _anthropic.messages.stream(**kwargs) as s:
+                    async for delta in s.text_stream:
+                        yield delta
+            else:
+                raise
     else:
         if not _openai:
             raise RuntimeError("No OpenAI API key configured")
@@ -577,13 +720,23 @@ async def _phase_claude_generate(
     """
     if existing_code:
         label = strategy_name or "this strategy"
-        user_content = (
-            f"Here is an existing strategy named **{label}**.\n\n"
-            + (f"Trader note: {intent}\n\n" if intent else "")
-            + f"```python\n{existing_code}\n```\n\n"
-            "Review this strategy following the 5-step generation process in your system prompt. "
-            "Output the final (possibly improved) code in a ```python block."
-        )
+        if intent:
+            # Fix Code path — surgical diff output
+            user_content = (
+                f"Trader's requested change: **{intent}**\n\n"
+                f"Existing strategy ({label}):\n"
+                f"```python\n{existing_code}\n```\n\n"
+                "Respond with SEARCH/REPLACE blocks only — do NOT return the entire file. "
+                "The SEARCH section must be an exact, verbatim copy of the lines you are replacing."
+            )
+        else:
+            # Scaffold repair / review — full review allowed
+            user_content = (
+                f"Here is an existing strategy named **{label}**.\n\n"
+                f"```python\n{existing_code}\n```\n\n"
+                "Review this strategy following the 5-step generation process in your system prompt. "
+                "Output the final (possibly improved) code in a ```python block."
+            )
     else:
         user_content = (
             f"{intent}\n\n"
@@ -594,8 +747,13 @@ async def _phase_claude_generate(
     full_text = ""
     yield {"type": "thinking", "turn": turn, "model": generate_model}
 
+    # Use extended output (64 K tokens) for Anthropic models — generation of large
+    # strategy files can easily exceed the standard 8 K output token limit.
+    # Falls back to standard mode automatically if the beta is unavailable.
+    _extended = _provider(generate_model) == "anthropic"
     try:
-        async for delta in _stream_text(generate_model, system_prompt, user_content):
+        async for delta in _stream_text(generate_model, system_prompt, user_content,
+                                        max_tokens=32000, extended_output=_extended):
             full_text += delta
             yield {"type": "text_delta", "delta": delta, "turn": turn, "model": generate_model}
     except Exception as exc:
@@ -604,7 +762,88 @@ async def _phase_claude_generate(
 
     yield {"type": "turn_complete", "turn": turn, "stop_reason": "end_turn"}
 
-    code = _extract_code_from_text(full_text) or existing_code or ""
+    # ── Resolve final code ────────────────────────────────────────────────────
+    # On the fix path (existing_code + intent) the LLM is instructed to return
+    # SEARCH/REPLACE blocks rather than the full file.  Try that first; if the
+    # output contains no blocks (or the LLM fell back to a full ```python block)
+    # we fall through to the standard full-file extractor.
+    is_fix_path = bool(existing_code and intent)
+    applied_via_diff = False
+
+    if is_fix_path:
+        patched, n_applied, n_total = _apply_search_replace(existing_code, full_text)  # type: ignore[arg-type]
+        if n_total > 0:
+            if n_applied == n_total:
+                # All blocks matched — validate the result parses as Python
+                try:
+                    ast.parse(patched)
+                    code = patched
+                    applied_via_diff = True
+                    yield {
+                        "type": "text_delta",
+                        "delta": (
+                            f"\n✏️ Applied {n_applied} SEARCH/REPLACE block"
+                            f"{'s' if n_applied != 1 else ''} successfully.\n"
+                        ),
+                        "turn": turn,
+                    }
+                except SyntaxError:
+                    # Patch produced invalid Python — warn and fall through
+                    yield {
+                        "type": "text_delta",
+                        "delta": "\n⚠️ Diff produced invalid Python — falling back to full-file extraction.\n",
+                        "turn": turn,
+                    }
+            else:
+                # Partial match — some SEARCH sections didn't match even after normalisation
+                yield {
+                    "type": "text_delta",
+                    "delta": (
+                        f"\n⚠️ {n_applied}/{n_total} SEARCH/REPLACE blocks matched — "
+                        "falling back to full-file extraction.\n"
+                    ),
+                    "turn": turn,
+                }
+
+    if not applied_via_diff:
+        code = _extract_code_from_text(full_text) or existing_code or ""
+
+    # ── Truncation guard (full-file path only) ────────────────────────────────
+    # Skipped when the result was assembled from SEARCH/REPLACE blocks because
+    # in that case we constructed the output ourselves — there is nothing to truncate.
+    if not applied_via_diff and existing_code and code and code != existing_code:
+        orig_line_count = len(existing_code.splitlines())
+        new_line_count  = len(code.splitlines())
+        line_ratio = new_line_count / max(orig_line_count, 1)
+
+        # Collect method names in both versions
+        _meth_re = re.compile(r'^\s+(?:async )?def (\w+)\(self', re.MULTILINE)
+        orig_methods    = set(_meth_re.findall(existing_code))
+        new_methods     = set(_meth_re.findall(code))
+        missing_methods = orig_methods - new_methods
+
+        # Truncation: output grew → cannot be a token-limit cut, skip method check.
+        # Output shrank < 75% → hard revert regardless of method diff.
+        # Output shrank 75-100% AND multiple methods vanished → likely truncation.
+        is_truncated = line_ratio < 0.75 or (line_ratio < 1.0 and len(missing_methods) > 2)
+        if is_truncated:
+            detail = f"{new_line_count} lines vs {orig_line_count} original"
+            if missing_methods:
+                detail += f"; missing methods: {', '.join(sorted(missing_methods)[:6])}"
+            yield {
+                "type": "text_delta",
+                "delta": (
+                    f"\n\u26a0\ufe0f **Output truncated \u2014 reverting to original** ({detail}).\n\n"
+                    "The LLM likely hit its output token limit before finishing the file.\n"
+                    "The original strategy has been kept intact. To work around this:\n"
+                    "\u2022 Split the change into smaller steps (one method at a time).\n"
+                    "\u2022 Use a more specific, targeted instruction.\n"
+                    "\u2022 Try a model with a higher output-token limit (e.g. Claude Opus).\n"
+                ),
+                "turn": turn,
+            }
+            code = existing_code  # revert — do not corrupt the strategy
+
     yield {"type": "_code_ready", "code": code, "intent_text": full_text}
 
 
@@ -1117,7 +1356,9 @@ async def run_strategy_workflow(
     gen_model = generate_model or DEFAULT_GENERATE_MODEL
     val_model = validate_model or DEFAULT_VALIDATE_MODEL
 
-    claude_system     = _load_generation_system()
+    is_fix_path       = bool(existing_code and intent.strip())
+    phase1_system     = _load_editing_system() if is_fix_path else _load_generation_system()
+    claude_system     = _load_generation_system()  # always full generation for scaffold repair
     validation_system = _load_fixing_system()
     testing_system    = _load_testing_system()
     reasoning_system  = _load_reasoning_system()
@@ -1144,7 +1385,7 @@ async def run_strategy_workflow(
         # Skip when existing_code but no intent → pass code straight to validation as-is
         if not existing_code or intent.strip():
             async for event in _phase_claude_generate(
-                intent, existing_code, strategy_name, claude_system, gen_model, turn=1
+                intent, existing_code, strategy_name, phase1_system, gen_model, turn=1
             ):
                 if event["type"] == "_code_ready":
                     code        = event["code"]

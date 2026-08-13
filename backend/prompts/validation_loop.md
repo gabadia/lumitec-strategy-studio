@@ -65,7 +65,7 @@ All 16 patterns must be present. If the error references one of these, add the m
 | 6 | `configure()` accepting `strategy_params` dict | Add method calling `apply_params` |
 | 7 | `on_stop()` | Add `self.observe("Strategy stopped")` |
 | 8 | `on_order_rejected()` | Add `self.observe(f"Order rejected: {event.client_order_id.value}")` |
-| 9 | `on_order_cancelled()` | Add `self.observe(f"Order cancelled: {event.client_order_id.value}")` |
+| 9 | `on_order_canceled()` | Add `self.observe(f"Order canceled: {event.client_order_id.value}")` |
 | 10 | `set_oms_type()` | Add `self._oms_type = oms_type` |
 | 11 | Rebuild signal in `apply_params()` | Call `self._rebuild_signal_engine()` or equivalent after param update |
 | 12 | Guard `on_order_filled` for unknown `leg_id` | Add `if leg_id is None: return` |

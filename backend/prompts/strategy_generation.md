@@ -182,8 +182,8 @@ class MyStrategy(LumiteBaseStrategy):
     def on_order_rejected(self, event) -> None:
         self.observe(f"Order rejected: {event.client_order_id.value}")
 
-    def on_order_cancelled(self, event) -> None:
-        self.observe(f"Order cancelled: {event.client_order_id.value}")
+    def on_order_canceled(self, event) -> None:
+        self.observe(f"Order canceled: {event.client_order_id.value}")
 
     def apply_params(self, updates: dict) -> None:
         with self._param_lock:
@@ -349,7 +349,7 @@ Required placement:
 - act after every order submission, cancellation, or forced_stop
 - observe in lifecycle hooks (on_start, on_stop, on_pause, on_resume)
 - act in on_order_filled (log fills)
-- observe in on_order_rejected and on_order_cancelled
+- observe in on_order_rejected and on_order_canceled
 
 ---
 

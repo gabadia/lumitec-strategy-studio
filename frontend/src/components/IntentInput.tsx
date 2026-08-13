@@ -104,6 +104,7 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
   const [isFirstSubmit, setIsFirstSubmit] = useState(false)
   const prevRunningRef = useRef(false)
 
+  const setCode = useStore((s) => s.setCode)
   const pendingSubmission = useStore((s) => s.pendingSubmission)
   const setPendingSubmission = useStore((s) => s.setPendingSubmission)
 
@@ -433,8 +434,25 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
             </div>
           )}
 
-          {/* Intent textarea — prompt mode always, other modes optional notes */}
-          {(mode === 'prompt' || mode === 'existing' || mode === 'code') && (
+          {/* Code paste area — CODE mode only, when editor is empty */}
+          {mode === 'code' && !editorCode.trim() && (
+            <textarea
+              placeholder="Paste your Python strategy code here…"
+              onChange={(e) => { if (e.target.value) setCode(e.target.value) }}
+              disabled={isRunning}
+              rows={4}
+              style={{
+                flex: 1,
+                color: isRunning ? 'var(--text-dim)' : 'var(--text)',
+                lineHeight: 1.6,
+                fontFamily: 'var(--font-mono)',
+                fontSize: 11,
+              }}
+            />
+          )}
+
+          {/* Intent textarea — prompt mode always, existing/code modes for notes */}
+          {(mode === 'prompt' || mode === 'existing' || (mode === 'code' && !!editorCode.trim())) && (
             <textarea
               value={intent}
               onChange={(e) => setIntent(e.target.value)}

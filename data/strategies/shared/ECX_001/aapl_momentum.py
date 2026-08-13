@@ -328,11 +328,11 @@ class AaplMomentum(LumitecBaseStrategy):
         self._exit_pending_bars = 0
         self.observe(f"Order rejected: {event.client_order_id.value}")
 
-    def on_order_cancelled(self, event) -> None:
+    def on_order_canceled(self, event) -> None:
         self._entry_pending = False
         self._exit_pending = False
         self._exit_pending_bars = 0
-        self.observe(f"Order cancelled: {event.client_order_id.value}")
+        self.observe(f"Order canceled: {event.client_order_id.value}")
 
     def on_stop(self) -> None:
         # teardown must mirror setup exactly

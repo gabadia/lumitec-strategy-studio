@@ -21,7 +21,7 @@ Validation checklist (all 16 required patterns present):
   6.  configure() accepting strategy_params dict
   7.  on_stop()
   8.  on_order_rejected()
-  9.  on_order_cancelled()
+  9.  on_order_canceled()
   10. set_oms_type()
   11. Rebuild signal windows in apply_params() when lookback changes
   12. Guard on_order_filled for unknown leg_id
@@ -434,9 +434,9 @@ class LSRStrategy(LumitecBaseStrategy):
             # Revert to IN_POSITION so next bar re-evaluates and retries exit
             self._state = _IN_POSITION
 
-    def on_order_cancelled(self, event) -> None:
+    def on_order_canceled(self, event) -> None:
         oid = event.client_order_id.value
-        self.observe(f"Order cancelled: {oid}")
+        self.observe(f"Order canceled: {oid}")
         if self._state == _PENDING_ENTRY:
             self._state = _FLAT
             self._entry_side = None

@@ -410,6 +410,7 @@ class BidAskSpreadCapture(LumitecBaseStrategy):
             "last_bid":   round(self._last_bid, 4),
             "last_ask":   round(self._last_ask, 4),
         })
+        self.unsubscribe_market_data(symbol=self.symbol, unsubscribe_quotes=True)
 
     # ------------------------------------------------------------------
     # Hot parameter updates

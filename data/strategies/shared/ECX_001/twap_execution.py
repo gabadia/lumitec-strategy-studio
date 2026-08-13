@@ -315,10 +315,10 @@ class TwapExecution(LumitecBaseStrategy):
         self._active_orders.pop(oid, None)
         self.observe(f"Order rejected: {oid} reason={event.reason}")
 
-    def on_order_cancelled(self, event) -> None:
+    def on_order_canceled(self, event) -> None:
         oid = event.client_order_id.value
         self._active_orders.pop(oid, None)
-        self.observe(f"Order cancelled: {oid}")
+        self.observe(f"Order canceled: {oid}")
 
     # ------------------------------------------------------------------
     # Stop

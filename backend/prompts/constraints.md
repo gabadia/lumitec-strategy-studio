@@ -72,7 +72,7 @@ Do not import or instantiate `RLock` in generated strategies. The base strategy 
 | 6 | `configure()` accepting `strategy_params` dict |
 | 7 | `on_stop()` |
 | 8 | `on_order_rejected()` |
-| 9 | `on_order_cancelled()` |
+| 9 | `on_order_canceled()` |
 | 10 | `set_oms_type()` |
 | 11 | Rebuild signal data in `apply_params()` when thresholds change |
 | 12 | Guard `on_order_filled` for unknown `leg_id` |

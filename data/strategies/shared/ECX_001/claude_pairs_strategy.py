@@ -737,10 +737,10 @@ class ClaudePairsStrategy(LumitecBaseStrategy):
         else:
             self._handle_order_failure(oid)
 
-    def on_order_cancelled(self, event) -> None:
+    def on_order_canceled(self, event) -> None:
         # fix: use .value not str()
         oid = event.client_order_id.value
-        self.observe("Order cancelled", context={
+        self.observe("Order canceled", context={
             "order_id": oid,
             "pair_state": self._pair_state.name,
             "shutting_down": self._shutting_down,

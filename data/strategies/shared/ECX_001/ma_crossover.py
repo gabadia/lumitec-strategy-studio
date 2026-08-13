@@ -292,11 +292,11 @@ class MovingAverageCrossover(LumitecBaseStrategy):
             self._pending_order_id = None
         self.observe(f"Order rejected: {oid} reason={event.reason}")
 
-    def on_order_cancelled(self, event) -> None:
+    def on_order_canceled(self, event) -> None:
         oid = event.client_order_id.value
         if self._pending_order_id == oid:
             self._pending_order_id = None
-        self.observe(f"Order cancelled: {oid}")
+        self.observe(f"Order canceled: {oid}")
 
     # ------------------------------------------------------------------
     # Pause / Resume
