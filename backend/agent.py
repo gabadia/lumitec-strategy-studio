@@ -33,9 +33,6 @@ load_dotenv(override=True)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY", "")
 ORCHESTRATOR_URL   = os.getenv("ORCHESTRATOR_URL",   "http://localhost:8000")
-SUPERVISOR_ID      = os.getenv("SUPERVISOR_ID",      "NUAM-DEV")
-VALIDATOR_URL      = os.getenv("VALIDATOR_URL",      "http://localhost:8003")  # strategy validator service
-VALIDATOR_PROD_URL = os.getenv("VALIDATOR_PROD_URL", "http://localhost:8003")  # strategy validator service (submit gate)
 
 # ─── Static capability manifest (replaces MCP tool discovery) ────────────────
 STUDIO_TOOLS = [
@@ -614,7 +611,7 @@ async def _stream_text(model: str, system: str, user: str, max_tokens: int = 160
         kwargs: dict = dict(
             model=model,
             max_tokens=max_tokens,
-            system=system,
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": user}],
         )
         if extended_output:
@@ -649,11 +646,14 @@ async def _stream_text(model: str, system: str, user: str, max_tokens: int = 160
 async def _complete(model: str, system: str, user: str, json_mode: bool = False) -> str:
     """Single non-streaming completion from either provider. Returns full text."""
     if _provider(model) == "anthropic":
-        sys_prompt = system
+        sys_blocks = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
         if json_mode:
-            sys_prompt = system + "\n\nRespond with valid JSON only. No markdown fences, no explanation."
+            sys_blocks.append({
+                "type": "text",
+                "text": "Respond with valid JSON only. No markdown fences, no explanation.",
+            })
         resp = await _anthropic.messages.create(
-            model=model, max_tokens=8096, system=sys_prompt,
+            model=model, max_tokens=8096, system=sys_blocks,
             messages=[{"role": "user", "content": user}],
         )
         text = resp.content[0].text
@@ -857,17 +857,19 @@ async def _phase_openai_validate(
     validation_profile: str = "prod",
 ) -> AsyncIterator[dict]:
     """
-    Stateless validation loop.
-    Calls the strategy validator service directly (VALIDATOR_URL); LLM fixes failures.
+    Local pre-check + LLM fix loop, run during generation before the user has
+    reviewed legs/params/time window. Only checks that are free and local
+    (no network call) run here — e.g. market-data lifecycle shape.
+
+    Full validation now happens only at actual submit time, against the real
+    orchestrator (see _phase_submit's submit-then-retry loop) — there is no
+    standalone HTTP validate endpoint in the real deployment to call earlier
+    than that (the validator Lambda is only reachable via IAM-restricted
+    invoke, from inside the orchestrator/strategy_server Lambdas).
+
     Yields SSE events.
     Yields {"type": "_validation_done", "passed": bool, "code": str} at the end.
     """
-
-    def _fmt_errors(errs: list) -> str:
-        return "\n".join(
-            f"- [{e.get('phase', '?')}] {e.get('message', str(e))}" for e in errs
-        )
-
     last_error = ""
     for attempt in range(MAX_VALIDATION_ATTEMPTS):
         turn = turn_offset + attempt + 1
@@ -879,33 +881,9 @@ async def _phase_openai_validate(
             duration_ms = 0
             content = "Errors:\n" + "\n".join(f"- [market_data_lifecycle] {msg}" for msg in local_errors)
         else:
-            t0 = time.monotonic()
-            try:
-                async with httpx.AsyncClient(timeout=30.0) as _vc:
-                    _vr = await _vc.post(
-                        f"{VALIDATOR_URL}/validate",
-                        json={"code": code, "correlation_id": f"studio-val-{attempt}", "profile": "development" if validation_profile in ("dev", "research") else "production"},
-                    )
-                    _vr.raise_for_status()
-                    data = _vr.json()
-                duration_ms = int((time.monotonic() - t0) * 1000)
-            except Exception as exc:
-                duration_ms = int((time.monotonic() - t0) * 1000)
-                yield {"type": "tool_error", "id": f"val_{attempt}", "name": "validate_strategy",
-                       "error": str(exc), "duration_ms": duration_ms, "turn": turn}
-                yield {"type": "_validation_done", "passed": False, "code": code}
-                return
-
-            failed = not data.get("validated", False)
-            errors   = data.get("errors",   [])
-            warnings = data.get("warnings", [])
-
-            content_parts = []
-            if errors:
-                content_parts.append("Errors:\n" + _fmt_errors(errors))
-            if warnings:
-                content_parts.append("Warnings:\n" + _fmt_errors(warnings))
-            content = "\n\n".join(content_parts) if content_parts else "Validation passed."
+            failed = False
+            duration_ms = 0
+            content = "Local pre-check passed. Full validation runs at submit time."
 
         yield {
             "type": "tool_result",
@@ -1119,11 +1097,25 @@ async def _phase_submit(
     end_iso: str,
     uid8: str,
     turn: int,
+    account_id: str,
+    trader_id: str,
+    supervisor_id: str,
+    auth_header: str,
     strategy_params: dict | None = None,
     validation_profile: str = "prod",
 ) -> AsyncIterator[dict]:
     """
-    Constructs the submit payload from extracted metadata and calls submit_strategy directly.
+    Constructs the submit payload and submits to the real Orchestrator.
+
+    There is no standalone HTTP validate endpoint against real infra (the
+    validator Lambda is only reachable via IAM-restricted invoke, from
+    inside the orchestrator/strategy_server Lambdas) — the orchestrator's
+    own submit endpoint validates inline_code submissions server-side and
+    returns 422 with structured errors BEFORE anything reaches the
+    supervisor, so a failed attempt has no side effects. On a 422, this
+    feeds the errors to the LLM fix prompt and resubmits, up to
+    MAX_VALIDATION_ATTEMPTS times.
+
     Yields SSE events.
     Yields {"type": "_submit_done", "success": bool, "strategy_id": str|None} at the end.
     """
@@ -1150,99 +1142,20 @@ async def _phase_submit(
         yield {"type": "_submit_done", "success": False, "strategy_id": None}
         return
 
-    # Hard gate — full production validation before the supervisor sees the code
-    yield {"type": "tool_executing", "name": "validate_strategy", "turn": turn}
-    _t0 = time.monotonic()
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as _vc:
-            _gr = await _vc.post(
-                f"{VALIDATOR_PROD_URL}/validate",
-                json={"code": code, "correlation_id": f"studio-submit-{uid8}", "profile": "development" if validation_profile in ("dev", "research") else "production"},
-            )
-            _gr.raise_for_status()
-            gate_data = _gr.json()
-        gate_ms = int((time.monotonic() - _t0) * 1000)
-    except Exception as gate_exc:
-        gate_ms = int((time.monotonic() - _t0) * 1000)
-        yield {"type": "tool_error", "id": "submit_gate", "name": "validate_strategy",
-               "error": str(gate_exc), "duration_ms": gate_ms, "turn": turn}
-        yield {"type": "text_delta",
-               "delta": f"\n**Cannot submit — validator unreachable:** {gate_exc}\n", "turn": turn}
-        yield {"type": "_submit_done", "success": False, "strategy_id": None}
-        return
-
-    gate_errors = gate_data.get("errors", [])
-    gate_passed = gate_data.get("validated", False)
-    gate_content = (
-        "Validation passed."
-        if gate_passed
-        else "Errors:\n" + "\n".join(
-            f"- [{e.get('phase', '?')}] {e.get('message', str(e))}" for e in gate_errors
-        )
-    )
-    yield {
-        "type": "tool_result",
-        "id": "submit_gate",
-        "name": "validate_strategy",
-        "content": gate_content[:2000],
-        "duration_ms": gate_ms,
-        "turn": turn,
-        "failed": not gate_passed,
-    }
-    if not gate_passed:
-        yield {"type": "text_delta",
-               "delta": f"\n**Cannot submit — validation failed:**\n```\n{gate_content[:1500]}\n```",
-               "turn": turn}
-        yield {"type": "_submit_done", "success": False, "strategy_id": None}
-        return
-
     class_name = metadata["class_name"]
-    strategy_id = f"{class_name}-{uid8}-ECX_001"
+    strategy_id = f"{class_name}-{uid8}-{account_id}"
+    headers = {"Authorization": auth_header} if auth_header else {}
+    fixing_system = _load_fixing_system()
+    submit_url = f"{ORCHESTRATOR_URL}/v1/supervisors/{supervisor_id}/strategies/submit"
 
-    config = {
-        "strategy_name": class_name,
-        "strategy_class": class_name,
-        "strategy_id": strategy_id,
-        "submission_method": "inline_code",
-        "account_id": "ECX_001",
-        "trader_id": "MEMO-DESK",
-        "supervisor_id": "NUAM-DEV",
-        "objective": metadata.get("objective", "SIGNAL_DRIVEN"),
-        "code": code,
-        "duration_minutes": 10,
-        "order_mode": "single",
-        "log_trades": False,
-        "log_quotes": True,
-        "strategy_params": strategy_params or {},
-        "legs": metadata.get("legs", [
-            {"leg_id": "A", "symbol": metadata.get("symbol", "AAPL"),
-             "quantity": 100, "side": "BUY", "tif": "DAY"}
-        ]),
-        "start_time": start_iso,
-        "end_time": end_iso,
-        "validation_profile": "development" if validation_profile in ("dev", "research") else "production",
-    }
+    for attempt in range(MAX_VALIDATION_ATTEMPTS):
+        attempt_turn = turn + attempt
 
-    # Emit tool_call so App.tsx updates step indicator and code panel
-    yield {
-        "type": "tool_call",
-        "id": "submit",
-        "name": "submit_strategy",
-        "input": config,
-        "turn": turn,
-    }
-
-    yield {"type": "tool_executing", "name": "submit_strategy", "turn": turn}
-    t0 = time.monotonic()
-    try:
+        # Extract and move Config before the strategy class if GPT emitted it out of order
         has_config = 'class Config(LumitecStrategyConfig)' in code
         config_pos = code.find('class Config(LumitecStrategyConfig)')
         strategy_pos = code.find('class ' + class_name)
-        print(f"[submit] strategy_id={strategy_id} has_Config={has_config} config_pos={config_pos} strategy_pos={strategy_pos}", flush=True)
-        print(f"[submit] CODE FIRST 3000 CHARS:\n{code[:3000]}", flush=True)
-        if config_pos > strategy_pos:
-            print(f"[submit] WARNING: Config class is defined AFTER strategy class — reordering", flush=True)
-            # Extract and move Config before the strategy class
+        if has_config and config_pos > strategy_pos:
             config_match = re.search(r'(class Config\(LumitecStrategyConfig\).*?)(?=\n\n|\nclass |\Z)', code, re.DOTALL)
             if config_match:
                 config_block = config_match.group(1)
@@ -1250,49 +1163,149 @@ async def _phase_submit(
                 strategy_match = re.search(r'\nclass ' + re.escape(class_name), code)
                 if strategy_match:
                     code = code[:strategy_match.start()] + '\n\n' + config_block + code[strategy_match.start():]
-        submit_url = f"{ORCHESTRATOR_URL}/v1/supervisors/{SUPERVISOR_ID}/strategies/submit"
-        print(f"[submit] POST {submit_url}", flush=True)
-        async with httpx.AsyncClient() as client:
-            response = await client.post(submit_url, json=config, timeout=30.0)
-        duration_ms = int((time.monotonic() - t0) * 1000)
-        content = response.text
-        print(f"[submit] HTTP {response.status_code} content={content[:300]}", flush=True)
-    except Exception as exc:
-        duration_ms = int((time.monotonic() - t0) * 1000)
-        print(f"[submit] EXCEPTION: {exc}", flush=True)
-        yield {"type": "tool_error", "id": "submit", "name": "submit_strategy",
-               "error": str(exc), "duration_ms": duration_ms, "turn": turn}
-        yield {"type": "_submit_done", "success": False, "strategy_id": None}
-        return
 
-    # Parse response to check success — avoid string matching on JSON formatting
-    try:
-        resp_json = response.json()
-        submit_ok = response.status_code in (200, 201) and resp_json.get("status") == "success"
-    except Exception:
-        submit_ok = False
-
-    yield {
-        "type": "tool_result",
-        "id": "submit",
-        "name": "submit_strategy",
-        "content": content[:2000],
-        "duration_ms": duration_ms,
-        "turn": turn,
-        "failed": not submit_ok,
-    }
-
-    if submit_ok:
-        yield {"type": "strategy_submitted", "strategy_id": strategy_id}
-        yield {"type": "_submit_done", "success": True, "strategy_id": strategy_id}
-    else:
-        yield {
-            "type": "text_delta",
-            "delta": f"\n**Submit failed:**\n```\n{content[:1500]}\n```\n",
-            "turn": turn,
-            "model": "GPT",
+        config = {
+            "strategy_name": class_name,
+            "strategy_class": class_name,
+            "strategy_id": strategy_id,
+            "submission_method": "inline_code",
+            "account_id": account_id,
+            "trader_id": trader_id,
+            "supervisor_id": supervisor_id,
+            "objective": metadata.get("objective", "SIGNAL_DRIVEN"),
+            "code": code,
+            "correlation_id": f"studio-submit-{uid8}-{attempt}",
+            "duration_minutes": 10,
+            "order_mode": "single",
+            "log_trades": False,
+            "log_quotes": True,
+            "strategy_params": strategy_params or {},
+            "legs": metadata.get("legs", [
+                {"leg_id": "A", "symbol": metadata.get("symbol", "AAPL"),
+                 "quantity": 100, "side": "BUY", "tif": "DAY"}
+            ]),
+            "start_time": start_iso,
+            "end_time": end_iso,
+            "validation_profile": "development" if validation_profile in ("dev", "research") else "production",
         }
-        yield {"type": "_submit_done", "success": False, "strategy_id": None}
+
+        # Emit tool_call so App.tsx updates step indicator and code panel
+        yield {
+            "type": "tool_call",
+            "id": f"submit_{attempt}",
+            "name": "submit_strategy",
+            "input": config,
+            "turn": attempt_turn,
+        }
+
+        yield {"type": "tool_executing", "name": "submit_strategy", "turn": attempt_turn}
+        t0 = time.monotonic()
+        try:
+            print(f"[submit] attempt={attempt} strategy_id={strategy_id} supervisor_id={supervisor_id} POST {submit_url}", flush=True)
+            async with httpx.AsyncClient() as client:
+                response = await client.post(submit_url, json=config, headers=headers, timeout=30.0)
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            content = response.text
+            print(f"[submit] HTTP {response.status_code} content={content[:300]}", flush=True)
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            print(f"[submit] EXCEPTION: {exc}", flush=True)
+            yield {"type": "tool_error", "id": f"submit_{attempt}", "name": "submit_strategy",
+                   "error": str(exc), "duration_ms": duration_ms, "turn": attempt_turn}
+            yield {"type": "_submit_done", "success": False, "strategy_id": None}
+            return
+
+        if response.status_code == 422:
+            try:
+                err_body = response.json()
+                err_body = err_body.get("detail", err_body) if isinstance(err_body, dict) else err_body
+            except Exception:
+                err_body = {"message": content[:1000]}
+            errors = err_body.get("errors", []) if isinstance(err_body, dict) else []
+            error_content = (
+                "Errors:\n" + "\n".join(f"- [{e.get('phase', '?')}] {e.get('message', str(e))}" for e in errors)
+                if errors
+                else (err_body.get("message", content[:1000]) if isinstance(err_body, dict) else content[:1000])
+            )
+
+            yield {
+                "type": "tool_result",
+                "id": f"submit_{attempt}",
+                "name": "submit_strategy",
+                "content": error_content[:2000],
+                "duration_ms": duration_ms,
+                "turn": attempt_turn,
+                "failed": True,
+            }
+
+            if attempt == MAX_VALIDATION_ATTEMPTS - 1:
+                yield {
+                    "type": "text_delta",
+                    "delta": f"\n**Submit failed after {MAX_VALIDATION_ATTEMPTS} attempts — validation errors:**\n```\n{error_content[:1500]}\n```",
+                    "turn": attempt_turn,
+                }
+                yield {"type": "_submit_done", "success": False, "strategy_id": None}
+                return
+
+            yield {
+                "type": "text_delta",
+                "delta": f"\n**Submit attempt {attempt + 1} failed validation:**\n```\n{error_content[:1000]}\n```\n",
+                "turn": attempt_turn,
+            }
+            yield {"type": "thinking", "turn": attempt_turn, "model": DEFAULT_VALIDATE_MODEL}
+            try:
+                fixed_text = await _complete(
+                    DEFAULT_VALIDATE_MODEL, fixing_system,
+                    f"CURRENT CODE:\n```python\n{code}\n```\n\n"
+                    f"VALIDATION ERROR (from submission attempt {attempt + 1}):\n{error_content}\n\n"
+                    "Return the corrected Python code only.",
+                )
+                fixed = _clean_openai_code(fixed_text)
+                if fixed:
+                    code = fixed
+                    yield {
+                        "type": "tool_call",
+                        "id": f"fix_{attempt}",
+                        "name": "validate_strategy",
+                        "input": {"code": code},
+                        "turn": attempt_turn,
+                    }
+            except Exception as exc:
+                yield {"type": "tool_error", "id": f"fix_{attempt}", "name": "openai_fix",
+                       "error": str(exc), "duration_ms": 0, "turn": attempt_turn}
+                yield {"type": "_submit_done", "success": False, "strategy_id": None}
+                return
+            continue
+
+        # Parse response to check success — avoid string matching on JSON formatting
+        try:
+            resp_json = response.json()
+            submit_ok = response.status_code in (200, 201) and resp_json.get("status") == "success"
+        except Exception:
+            submit_ok = False
+
+        yield {
+            "type": "tool_result",
+            "id": f"submit_{attempt}",
+            "name": "submit_strategy",
+            "content": content[:2000],
+            "duration_ms": duration_ms,
+            "turn": attempt_turn,
+            "failed": not submit_ok,
+        }
+
+        if submit_ok:
+            yield {"type": "strategy_submitted", "strategy_id": strategy_id}
+            yield {"type": "_submit_done", "success": True, "strategy_id": strategy_id}
+        else:
+            yield {
+                "type": "text_delta",
+                "delta": f"\n**Submit failed:**\n```\n{content[:1500]}\n```\n",
+                "turn": attempt_turn,
+                "model": "GPT",
+            }
+            yield {"type": "_submit_done", "success": False, "strategy_id": None}
+        return
 
 
 # ─── Phase 4: OpenAI simulation monitor ──────────────────────────────────────
@@ -1515,14 +1528,19 @@ async def run_resubmit_workflow(
     code: str,
     legs: list[dict],
     strategy_params: dict,
+    account_id: str,
+    trader_id: str,
+    supervisor_id: str,
+    auth_header: str,
     monitor_model: str | None = None,
     start_time: str | None = None,
     end_time: str | None = None,
     validation_profile: str = "prod",
 ) -> AsyncIterator[dict]:
     """
-    Re-submit flow: runs validate_strategy via MCP first (blocks on failure),
-    then POSTs to Orchestrator REST API.
+    Re-submit flow: submits to the real Orchestrator, which validates
+    inline_code submissions server-side (see _phase_submit's submit-then-retry
+    loop — there is no separate pre-submit validate call against real infra).
     Skips Phase 1 (generation) — uses the code already in the editor.
     """
 
@@ -1563,65 +1581,15 @@ async def run_resubmit_workflow(
             yield {"type": "done"}
             return
 
-        # ── Pre-submit validation ─────────────────────────────────────────────
-        yield {"type": "text_delta", "delta": "**Validating before resubmit…**\n", "turn": 1}
-        _t0 = time.monotonic()
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as _vc:
-                _vr = await _vc.post(
-                    f"{VALIDATOR_PROD_URL}/validate",
-                    json={"code": code, "correlation_id": uid8, "profile": "development" if validation_profile in ("dev", "research") else "production"},
-                )
-                _vr.raise_for_status()
-                val_data = _vr.json()
-            _val_duration_ms = int((time.monotonic() - _t0) * 1000)
-        except Exception as val_exc:
-            _val_duration_ms = int((time.monotonic() - _t0) * 1000)
-            yield {"type": "tool_error", "id": "resubmit_val", "name": "validate_strategy",
-                   "error": str(val_exc), "duration_ms": _val_duration_ms, "turn": 1}
-            yield {
-                "type": "text_delta",
-                "delta": f"\n**Resubmit blocked — validator unreachable:** {val_exc}\n",
-                "turn": 1,
-            }
-            yield {"type": "turn_complete", "turn": 1, "stop_reason": "end_turn"}
-            yield {"type": "done"}
-            return
-
-        _val_failed = not val_data.get("validated", False)
-        val_errors  = val_data.get("errors", [])
-        _val_content = (
-            "Validation passed."
-            if not _val_failed
-            else "Errors:\n" + "\n".join(
-                f"- [{e.get('phase', '?')}] {e.get('message', str(e))}" for e in val_errors
-            )
-        )
-        yield {
-            "type": "tool_result",
-            "id": "resubmit_val",
-            "name": "validate_strategy",
-            "content": _val_content[:2000],
-            "duration_ms": _val_duration_ms,
-            "turn": 1,
-            "failed": _val_failed,
-        }
-        if _val_failed:
-            yield {
-                "type": "text_delta",
-                "delta": f"\n**Resubmit blocked — validation failed:**\n```\n{_val_content[:1500]}\n```",
-                "turn": 1,
-            }
-            yield {"type": "turn_complete", "turn": 1, "stop_reason": "end_turn"}
-            yield {"type": "done"}
-            return
-
         yield {"type": "text_delta", "delta": "**Resubmitting with updated legs and parameters…**\n", "turn": 1}
 
-        # Submit via Orchestrator REST API
+        # Submit via Orchestrator REST API — validates server-side, auto-fix
+        # retries on 422 (see _phase_submit)
         strategy_id = None
         async for event in _phase_submit(
             code, metadata, start_iso, end_iso, uid8, turn=1,
+            account_id=account_id, trader_id=trader_id, supervisor_id=supervisor_id,
+            auth_header=auth_header,
             strategy_params=strategy_params,
             validation_profile=validation_profile,
         ):
