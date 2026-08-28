@@ -40,6 +40,7 @@ from pathlib import Path
 import aiosqlite
 import httpx
 import uvicorn
+import websockets
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -57,12 +58,12 @@ from agent import (
     _TERMINAL_EVENTS,
     _resolve_termination_type,
     ORCHESTRATOR_URL,
-    SUPERVISOR_ID,
     AVAILABLE_MODELS,
     DEFAULT_GENERATE_MODEL,
     DEFAULT_VALIDATE_MODEL,
     DEFAULT_MONITOR_MODEL,
 )
+from auth import resolve_claims, resolve_trading_identity
 
 load_dotenv()
 
@@ -164,16 +165,19 @@ def _shared_dir(org_id: str) -> Path:
     return STRATEGIES_DIR / "shared" / org_id
 
 
-def _get_trader_id(request: Request) -> str:
-    raw = request.headers.get("X-Trader-Id", "default")
-    return _check_id(raw, "trader_id")
+async def _get_trader_id(request: Request) -> str:
+    """Studio's own private-strategy-folder scoping key — the caller's
+    verified Cognito sub, not the trading-domain trader_id (see auth.py's
+    TradingIdentity for that, used only at submit time)."""
+    claims = await resolve_claims(request)
+    return _check_id(claims.sub, "trader_id")
 
 
-def _get_org_id(request: Request) -> str | None:
-    raw = request.headers.get("X-Org-Id", "").strip()
-    if not raw:
+async def _get_org_id(request: Request) -> str | None:
+    claims = await resolve_claims(request)
+    if not claims.org_id:
         return None
-    return _check_id(raw, "org_id")
+    return _check_id(claims.org_id, "org_id")
 
 
 # ---------------------------------------------------------------------------
@@ -194,10 +198,6 @@ class SaveStrategyRequest(BaseModel):
     code: str
 
 
-class StopStrategyRequest(BaseModel):
-    strategy_id: str
-
-
 class ParseStrategyRequest(BaseModel):
     code: str
 
@@ -209,6 +209,7 @@ class ResubmitStrategyRequest(BaseModel):
     monitor_model: str | None = None
     start_time: str | None = None   # ISO 8601 UTC — if omitted, defaults to NYSE open
     end_time: str | None = None     # ISO 8601 UTC — if omitted, defaults to NYSE close
+    supervisor_id: str              # which supervisor to submit to (e.g. "USA-1", "SPAIN-1")
 
 
 class PublishStrategyRequest(BaseModel):
@@ -583,8 +584,8 @@ async def health():
 @app.get("/strategies")
 async def list_strategies(request: Request):
     """Return strategies available to the trader: private first, then org-shared."""
-    trader_id = _get_trader_id(request)
-    org_id = _get_org_id(request)
+    trader_id = await _get_trader_id(request)
+    org_id = await _get_org_id(request)
 
     results: list[dict] = []
 
@@ -609,8 +610,8 @@ async def list_strategies(request: Request):
 async def get_strategy(name: str, request: Request):
     """Return source code — private copy takes priority over shared."""
     _check_name(name)
-    trader_id = _get_trader_id(request)
-    org_id = _get_org_id(request)
+    trader_id = await _get_trader_id(request)
+    org_id = await _get_org_id(request)
 
     path = _trader_dir(trader_id) / f"{name}.py"
     source = "private"
@@ -629,7 +630,7 @@ async def get_strategy(name: str, request: Request):
 async def save_strategy(name: str, request: Request, body: SaveStrategyRequest):
     """Save to trader's private directory (creates the file if it does not exist yet)."""
     _check_name(name)
-    trader_id = _get_trader_id(request)
+    trader_id = await _get_trader_id(request)
 
     private_dir = _trader_dir(trader_id)
     private_dir.mkdir(parents=True, exist_ok=True)
@@ -639,29 +640,28 @@ async def save_strategy(name: str, request: Request, body: SaveStrategyRequest):
     return {"name": name, "saved": True, "source": "private"}
 
 
-@app.post("/stop-strategy")
-async def stop_strategy_legacy(request: StopStrategyRequest):
-    """Legacy stop endpoint — proxies to Orchestrator port 8000."""
-    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{SUPERVISOR_ID}/strategies/{request.strategy_id}/stop"
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, timeout=10.0)
-        return {"stopped": response.status_code in (200, 204), "strategy_id": request.strategy_id}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
 # ---------------------------------------------------------------------------
-# Execution plane proxy (→ Orchestrator port 8000)
+# Execution plane proxy (→ real Orchestrator, API Gateway + Cognito authorizer)
+# Every call forwards the caller's Authorization bearer token unchanged —
+# the orchestrator's own Cognito authorizer + entitlement check is the real
+# enforcement point, not this backend. supervisor_id is required on every
+# call since a strategy could be running on any supervisor the caller
+# submitted it to (USA-1, SPAIN-1, ...) — there is no longer a single
+# fixed default.
 # ---------------------------------------------------------------------------
+
+def _auth_headers(request: Request) -> dict[str, str]:
+    auth = request.headers.get("Authorization", "")
+    return {"Authorization": auth} if auth else {}
+
 
 @app.post("/strategies/{strategy_id}/stop")
-async def api_stop_strategy(strategy_id: str):
+async def api_stop_strategy(strategy_id: str, supervisor_id: str, request: Request):
     """Stop a running strategy via Orchestrator."""
-    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{SUPERVISOR_ID}/strategies/{strategy_id}/stop"
+    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{supervisor_id}/strategies/{strategy_id}/stop"
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(url, timeout=10.0)
+            response = await client.post(url, headers=_auth_headers(request), timeout=10.0)
         if response.status_code not in (200, 204):
             raise HTTPException(status_code=response.status_code, detail=response.text)
         return {"stopped": True, "strategy_id": strategy_id}
@@ -672,12 +672,12 @@ async def api_stop_strategy(strategy_id: str):
 
 
 @app.post("/strategies/{strategy_id}/pause")
-async def api_pause_strategy(strategy_id: str):
+async def api_pause_strategy(strategy_id: str, supervisor_id: str, request: Request):
     """Pause a running strategy via Orchestrator."""
-    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{SUPERVISOR_ID}/strategies/{strategy_id}/pause"
+    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{supervisor_id}/strategies/{strategy_id}/pause"
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(url, timeout=10.0)
+            response = await client.post(url, headers=_auth_headers(request), timeout=10.0)
         if response.status_code not in (200, 204):
             raise HTTPException(status_code=response.status_code, detail=response.text)
         return {"paused": True, "strategy_id": strategy_id}
@@ -688,12 +688,12 @@ async def api_pause_strategy(strategy_id: str):
 
 
 @app.post("/strategies/{strategy_id}/resume")
-async def api_resume_strategy(strategy_id: str):
+async def api_resume_strategy(strategy_id: str, supervisor_id: str, request: Request):
     """Resume a paused strategy via Orchestrator."""
-    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{SUPERVISOR_ID}/strategies/{strategy_id}/resume"
+    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{supervisor_id}/strategies/{strategy_id}/resume"
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(url, timeout=10.0)
+            response = await client.post(url, headers=_auth_headers(request), timeout=10.0)
         if response.status_code not in (200, 204):
             raise HTTPException(status_code=response.status_code, detail=response.text)
         return {"resumed": True, "strategy_id": strategy_id}
@@ -704,13 +704,13 @@ async def api_resume_strategy(strategy_id: str):
 
 
 @app.patch("/strategies/{strategy_id}/params")
-async def api_update_params(strategy_id: str, request: Request):
+async def api_update_params(strategy_id: str, supervisor_id: str, request: Request):
     """Update strategy parameters via Orchestrator."""
     body = await request.json()
-    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{SUPERVISOR_ID}/strategies/{strategy_id}/params"
+    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{supervisor_id}/strategies/{strategy_id}/params"
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.patch(url, json=body, timeout=10.0)
+            response = await client.patch(url, json=body, headers=_auth_headers(request), timeout=10.0)
         if response.status_code not in (200, 204):
             raise HTTPException(status_code=response.status_code, detail=response.text)
         return response.json() if response.content else {"updated": True}
@@ -721,13 +721,13 @@ async def api_update_params(strategy_id: str, request: Request):
 
 
 @app.get("/strategies/{strategy_id}/logs")
-async def api_strategy_logs(strategy_id: str, since: str = "1h", n: int = 200):
+async def api_strategy_logs(strategy_id: str, supervisor_id: str, request: Request, since: str = "1h", n: int = 200):
     """Proxy strategy container logs from the Orchestrator supervisor API."""
-    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{SUPERVISOR_ID}/strategies/{strategy_id}/logs"
+    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{supervisor_id}/strategies/{strategy_id}/logs"
     params = {"since": since, "n": min(n, 2000)}
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, params=params, timeout=30.0)
+            response = await client.get(url, params=params, headers=_auth_headers(request), timeout=30.0)
         for code in (404, 500, 502, 504):
             if response.status_code == code:
                 raise HTTPException(status_code=code, detail=response.text)
@@ -741,12 +741,12 @@ async def api_strategy_logs(strategy_id: str, since: str = "1h", n: int = 200):
 
 
 @app.get("/strategies/{strategy_id}/status")
-async def api_get_status(strategy_id: str):
+async def api_get_status(strategy_id: str, supervisor_id: str, request: Request):
     """Get strategy status from Orchestrator."""
-    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{SUPERVISOR_ID}/strategies/{strategy_id}"
+    url = f"{ORCHESTRATOR_URL}/v1/supervisors/{supervisor_id}/strategies/{strategy_id}"
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, timeout=10.0)
+            response = await client.get(url, headers=_auth_headers(request), timeout=10.0)
         if response.status_code == 404:
             raise HTTPException(status_code=404, detail="Strategy not found")
         if response.status_code != 200:
@@ -762,16 +762,60 @@ async def api_get_status(strategy_id: str):
 # SSE relay (→ SSE Gateway port 9001)
 # ---------------------------------------------------------------------------
 
+async def _iter_gateway_events():
+    """Yield raw parsed event dicts from a local SSE gateway (HTTP GET,
+    text/event-stream) — the order-strategy-system local-dev topology."""
+    gateway_url = f"{SSE_GATEWAY_URL}/stream"
+    async with httpx.AsyncClient() as client:
+        async with client.stream(
+            "GET",
+            gateway_url,
+            headers={"Accept": "text/event-stream", "Cache-Control": "no-cache"},
+            timeout=None,
+        ) as response:
+            async for line in response.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                raw = line[5:].strip()
+                if not raw:
+                    continue
+                try:
+                    yield json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+
+
+async def _iter_websocket_events():
+    """Yield raw parsed event dicts from the real-time WebSocket fanout
+    (lumitec-desk-cloud's Kafka fanout, e.g. wss://events.clouddesk.lumitec.com/).
+    No auth handshake, no subscribe message, no per-connection filtering —
+    it broadcasts every event for every strategy; the caller filters by
+    strategy_id, same as the gateway path. Matches lumitec-desk-ui's client
+    (src/services/sseClient.ts) — plain WebSocket, JSON messages with a
+    `type` field."""
+    async with websockets.connect(SSE_GATEWAY_URL, open_timeout=10) as ws:
+        async for raw in ws:
+            try:
+                yield json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+
+
 @app.get("/strategies/{strategy_id}/events")
 async def api_strategy_events(strategy_id: str):
     """
-    Subscribe to real-time events for a specific strategy.
-    Connects to the SSE gateway on port 9001, filters by strategy_id,
-    enriches terminal events with termination_type, and streams to browser.
+    Subscribe to real-time events for a specific strategy, filtered by
+    strategy_id, enriched with termination_type on terminal events, and
+    streamed to the browser as SSE.
+
+    Upstream source is picked by SSE_GATEWAY_URL's scheme: ws:// or wss://
+    connects to the real-time WebSocket fanout (real deployment); http:// or
+    https:// polls a local SSE gateway (order-strategy-system local dev).
     """
+    is_websocket_source = SSE_GATEWAY_URL.startswith(("ws://", "wss://"))
+
     async def event_stream():
         db = None
-        gateway_url = f"{SSE_GATEWAY_URL}/stream"
         try:
             # Open (or create) the run DB — may already exist if init_strategy_db fired first
             RUNS_DIR.mkdir(parents=True, exist_ok=True)
@@ -808,59 +852,42 @@ async def api_strategy_events(strategy_id: str):
                 # Strategy already finished — no need to connect to live gateway.
                 return
 
-            async with httpx.AsyncClient() as client:
-                async with client.stream(
-                    "GET",
-                    gateway_url,
-                    headers={"Accept": "text/event-stream", "Cache-Control": "no-cache"},
-                    timeout=None,
-                ) as response:
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data:"):
-                            continue
-                        raw = line[5:].strip()
-                        if not raw:
-                            continue
-                        try:
-                            event = json.loads(raw)
-                        except json.JSONDecodeError:
-                            continue
+            event_source = _iter_websocket_events() if is_websocket_source else _iter_gateway_events()
+            async for event in event_source:
+                # Resolve event type — skip heartbeats and empty events
+                event_type = event.get("event_type") or event.get("type", "")
+                if not event_type:
+                    continue
 
-                        # Resolve event type — skip heartbeats and empty events
-                        event_type = event.get("event_type") or event.get("type", "")
-                        if not event_type:
-                            continue
+                # Filter by strategy_id
+                data_field = event.get("data")
+                event_sid = event.get("strategy_id") or (data_field.get("strategy_id", "") if isinstance(data_field, dict) else "")
+                if event_sid and event_sid != strategy_id:
+                    continue
 
-                        # Filter by strategy_id
-                        data_field = event.get("data")
-                        event_sid = event.get("strategy_id") or (data_field.get("strategy_id", "") if isinstance(data_field, dict) else "")
-                        print(f"[sse-relay] type={event_type!r} sid={event_sid!r} target={strategy_id!r}", flush=True)
-                        if event_sid and event_sid != strategy_id:
-                            continue
+                # Enrich terminal events with termination_type
+                if event_type in _TERMINAL_EVENTS:
+                    content_str = json.dumps(event)
+                    event["termination_type"] = _resolve_termination_type(event_type, content_str)
 
-                        # Enrich terminal events with termination_type
-                        if event_type in _TERMINAL_EVENTS:
-                            content_str = json.dumps(event)
-                            event["termination_type"] = _resolve_termination_type(event_type, content_str)
+                # Persist to SQLite
+                ts_ms = int(time.time() * 1000)
+                await db.execute(
+                    "INSERT INTO events (ts, event_type, raw) VALUES (?, ?, ?)",
+                    (ts_ms, event_type, json.dumps(event)),
+                )
+                if "termination_type" in event:
+                    await db.execute(
+                        "INSERT OR REPLACE INTO meta (key, value) VALUES ('termination_type', ?)",
+                        (event["termination_type"],),
+                    )
+                await db.commit()
 
-                        # Persist to SQLite
-                        ts_ms = int(time.time() * 1000)
-                        await db.execute(
-                            "INSERT INTO events (ts, event_type, raw) VALUES (?, ?, ?)",
-                            (ts_ms, event_type, json.dumps(event)),
-                        )
-                        if "termination_type" in event:
-                            await db.execute(
-                                "INSERT OR REPLACE INTO meta (key, value) VALUES ('termination_type', ?)",
-                                (event["termination_type"],),
-                            )
-                        await db.commit()
+                yield f"data: {json.dumps(event)}\n\n"
 
-                        yield f"data: {json.dumps(event)}\n\n"
-
-                        # Stop relaying after terminal event
-                        if "termination_type" in event:
-                            break
+                # Stop relaying after terminal event
+                if "termination_type" in event:
+                    break
 
         except Exception as exc:
             yield f"data: {json.dumps({'type': 'relay_error', 'message': str(exc)})}\n\n"
@@ -883,8 +910,17 @@ async def parse_strategy(body: ParseStrategyRequest):
 
 
 @app.post("/resubmit-strategy")
-async def resubmit_strategy(body: ResubmitStrategyRequest):
+async def resubmit_strategy(body: ResubmitStrategyRequest, request: Request):
     """Resubmit an existing validated strategy with updated legs and params (skips generation + validation)."""
+    claims = await resolve_claims(request)
+    identity = resolve_trading_identity(claims)
+    if body.supervisor_id not in identity.supervisor_ids:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Not entitled to supervisor '{body.supervisor_id}' (entitled: {identity.supervisor_ids})",
+        )
+    auth_header = request.headers.get("Authorization", "")
+
     async def event_stream():
         try:
             async for event in run_resubmit_workflow(
@@ -894,6 +930,10 @@ async def resubmit_strategy(body: ResubmitStrategyRequest):
                 monitor_model=body.monitor_model,
                 start_time=body.start_time,
                 end_time=body.end_time,
+                account_id=identity.account_id,
+                trader_id=identity.trader_id,
+                supervisor_id=body.supervisor_id,
+                auth_header=auth_header,
             ):
                 # Initialize the run DB immediately when the strategy is accepted by the
                 # Orchestrator — before the browser opens the EventSource relay, ensuring
@@ -920,10 +960,10 @@ async def resubmit_strategy(body: ResubmitStrategyRequest):
 async def publish_strategy(body: PublishStrategyRequest, request: Request):
     """Publish/register current strategy code via strategy server API."""
     _check_name(body.name)
-    trader_id = _get_trader_id(request)
-    org_id = _get_org_id(request)
+    trader_id = await _get_trader_id(request)
+    org_id = await _get_org_id(request)
     if not org_id:
-        raise HTTPException(status_code=400, detail="X-Org-Id header is required for publish")
+        raise HTTPException(status_code=400, detail="Caller's identity has no organization_id — cannot publish")
 
     publish_url = f"{STRATEGY_SERVER_URL.rstrip('/')}{STRATEGY_SERVER_PUBLISH_PATH}"
     file_name = body.name if body.name.endswith(".py") else f"{body.name}.py"
@@ -932,9 +972,13 @@ async def publish_strategy(body: PublishStrategyRequest, request: Request):
         "file_name": file_name,
         "display_name": body.name,
     }
+    # strategy_server resolves identity from the Cognito claims API Gateway
+    # injects for a verified bearer token, not from these X- headers — kept
+    # only as a harmless local-storage-scoping hint, forwarding is what matters.
     upstream_headers = {
         "X-Trader-Id": trader_id,
         "X-Org-Id": org_id,
+        **_auth_headers(request),
     }
 
     try:

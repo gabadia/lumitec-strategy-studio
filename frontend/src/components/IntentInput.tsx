@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef, KeyboardEvent } from 'react'
-import { getTraderHeaders } from '../auth'
+import { authHeaders } from '../auth/cognito'
 import { useStore } from '../App'
 import type { ModelSettings } from '../App'
 
@@ -16,11 +16,17 @@ const AVAILABLE_MODELS = [
 interface LegParam { leg_id: string; symbol: string; quantity: number; side: string; tif: string }
 interface ConfigParam { name: string; type: 'int' | 'float' | 'bool' | 'str'; value: string | number | boolean }
 
+// Real supervisors this deployment's orchestrator knows about. Whether the
+// logged-in user is actually entitled to submit against one is enforced
+// server-side (backend/main.py's resubmit-strategy route) — this is just
+// the picker's option list.
+const SUPERVISORS = ['USA-1', 'SPAIN-1']
+
 interface Props {
   onRun: (intent: string, strategyName?: string, existingCode?: string, workflowMode?: string) => void
   onLoad: (strategyName: string) => void
   onStop: () => void
-  onResubmit: (legs: object[], strategyParams: Record<string, unknown>, code: string, startTime: string, endTime: string) => void
+  onResubmit: (legs: object[], strategyParams: Record<string, unknown>, code: string, supervisorId: string, startTime: string, endTime: string) => void
   isRunning: boolean
   editorCode: string   // current code in the editor — used by CODE mode
   modelSettings: ModelSettings
@@ -101,6 +107,7 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
   const [parseBusy, setParseBusy] = useState(false)
   const [startTime, setStartTime] = useState('')
   const [endTime, setEndTime] = useState('')
+  const [supervisorId, setSupervisorId] = useState(SUPERVISORS[0])
   const [isFirstSubmit, setIsFirstSubmit] = useState(false)
   const prevRunningRef = useRef(false)
 
@@ -159,7 +166,7 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
     try {
       const r = await fetch('/api/parse-strategy', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getTraderHeaders() },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ code: editorCode }),
       })
       const d = await r.json()
@@ -178,12 +185,12 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
     const toISO = (local: string) => local ? new Date(local).toISOString() : ''
     setShowChangeSubmission(false)
     setShowFeedback(false)
-    onResubmit(legs, strategyParams, editorCode, toISO(startTime), toISO(endTime))
-  }, [legs, params, editorCode, startTime, endTime, onResubmit])
+    onResubmit(legs, strategyParams, editorCode, supervisorId, toISO(startTime), toISO(endTime))
+  }, [legs, params, editorCode, supervisorId, startTime, endTime, onResubmit])
 
   useEffect(() => {
     if (mode !== 'existing' || strategies.length > 0) return
-    fetch('/api/strategies', { headers: getTraderHeaders() })
+    fetch('/api/strategies', { headers: authHeaders() })
       .then((r) => r.json())
       .then((d) => setStrategies(d.strategies ?? []))
       .catch(() => {})
@@ -192,7 +199,13 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
   const handleLoad = useCallback(async () => {
     if (!selected || isRunning || busy) return
     setBusy(true)
-    try { onLoad(selected) } finally { setBusy(false) }
+    try {
+      onLoad(selected)
+      // Loading isn't a "run" (isRunning never flips), so the normal
+      // running→stopped effect that reveals the post-load action bar never
+      // fires — surface it directly so a loaded strategy can be submitted.
+      setShowFeedback(true)
+    } finally { setBusy(false) }
   }, [selected, isRunning, busy, onLoad])
 
   const retryWithFeedback = useCallback(() => {
@@ -217,7 +230,7 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
       if (!selected) return
       setBusy(true)
       try {
-        const r = await fetch(`/api/strategies/${selected}`, { headers: getTraderHeaders() })
+        const r = await fetch(`/api/strategies/${selected}`, { headers: authHeaders() })
         const d = await r.json()
         onRun(intent.trim(), selected, d.code, workflowMode)
       } finally { setBusy(false) }
@@ -617,6 +630,17 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
               </div>
             </div>
           )}
+
+          {/* Supervisor */}
+          <div>
+            <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 4, fontFamily: 'var(--font-mono)' }}>
+              SUPERVISOR
+            </div>
+            <select value={supervisorId} onChange={e => setSupervisorId(e.target.value)}
+              style={{ padding: '3px 6px', fontSize: 12, fontFamily: 'var(--font-mono)', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--text)', cursor: 'pointer' }}>
+              {SUPERVISORS.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
 
           {/* Session timing */}
           <div>

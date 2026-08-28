@@ -11,7 +11,8 @@ import LoginGate from './components/LoginGate'
 import ClearRunsDialog from './components/ClearRunsDialog'
 import type { ActivityEntry, StrategyRawEvent, StudioEvent, WorkflowStep } from './types'
 import { toolToStep } from './types'
-import { clearTrader, getTrader, getTraderHeaders } from './auth'
+import { authHeaders } from './auth/cognito'
+import { useSessionStore } from './auth/sessionStore'
 
 // ---------------------------------------------------------------------------
 // Global store
@@ -41,6 +42,7 @@ interface StudioState {
   loadedStrategyName: string | null   // tracks which file code was loaded from
   toolsAvailable: string[]
   activeStrategyId: string | null     // set after submit_strategy succeeds
+  activeSupervisorId: string | null   // which supervisor that strategy was submitted to
   modelSettings: ModelSettings
   pendingSubmission: {
     legs: Array<{ leg_id: string; symbol: string; quantity: number; side: string; tif: string }>
@@ -60,6 +62,7 @@ interface StudioState {
   setLoadedStrategyName: (name: string | null) => void
   setTools: (t: string[]) => void
   setActiveStrategyId: (id: string | null) => void
+  setActiveSupervisorId: (id: string | null) => void
   setModelSettings: (s: ModelSettings) => void
   setPendingSubmission: (v: StudioState['pendingSubmission']) => void
   reset: () => void
@@ -77,6 +80,7 @@ export const useStore = create<StudioState>((set) => ({
   loadedStrategyName: null,
   toolsAvailable: [],
   activeStrategyId: null,
+  activeSupervisorId: null,
   modelSettings: DEFAULT_MODEL_SETTINGS,
   pendingSubmission: null,
 
@@ -101,9 +105,10 @@ export const useStore = create<StudioState>((set) => ({
   setLoadedStrategyName: (name) => set({ loadedStrategyName: name }),
   setTools: (t) => set({ toolsAvailable: t }),
   setActiveStrategyId: (id) => set({ activeStrategyId: id }),
+  setActiveSupervisorId: (id) => set({ activeSupervisorId: id }),
   setModelSettings: (s) => set({ modelSettings: s }),
   setPendingSubmission: (v) => set({ pendingSubmission: v }),
-  reset: () => set({ isRunning: false, step: 'idle', activity: [], strategyEvents: [], code: '', savedCode: '', loadedStrategyName: null, activeStrategyId: null, pendingSubmission: null }),
+  reset: () => set({ isRunning: false, step: 'idle', activity: [], strategyEvents: [], code: '', savedCode: '', loadedStrategyName: null, activeStrategyId: null, activeSupervisorId: null, pendingSubmission: null }),
 }))
 
 // ---------------------------------------------------------------------------
@@ -117,6 +122,7 @@ async function streamResubmit(
   code: string,
   legs: object[],
   strategyParams: Record<string, unknown>,
+  supervisorId: string,
   onEvent: (event: StudioEvent) => void,
   signal: AbortSignal,
   monitorModel?: string,
@@ -126,11 +132,12 @@ async function streamResubmit(
 ) {
   const response = await fetch('/api/resubmit-strategy', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...getTraderHeaders() },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({
       code,
       legs,
       strategy_params: strategyParams,
+      supervisor_id: supervisorId,
       monitor_model: monitorModel,
       ...(startTime ? { start_time: startTime } : {}),
       ...(endTime   ? { end_time:   endTime   } : {}),
@@ -169,7 +176,7 @@ async function streamWorkflow(
 ) {
   const response = await fetch('/api/run-strategy', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...getTraderHeaders() },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({
       intent,
       ...(strategyName ? { strategy_name: strategyName } : {}),
@@ -216,9 +223,9 @@ const nextStrategyEventId = () => String(++strategyEventId)
 
 export default function App() {
   const {
-    isRunning, step, code, modelSettings, activeStrategyId,
+    isRunning, step, code, modelSettings, activeStrategyId, activeSupervisorId,
     setRunning, setStep, addActivity, updateLastActivity, addStrategyEvent, clearStrategyEvents,
-    setCode, setSavedCode, setLoadedStrategyName, setTools, setActiveStrategyId, setModelSettings, setPendingSubmission, reset,
+    setCode, setSavedCode, setLoadedStrategyName, setTools, setActiveStrategyId, setActiveSupervisorId, setModelSettings, setPendingSubmission, reset,
   } = useStore()
   const abortRef = useRef<AbortController | null>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
@@ -297,7 +304,7 @@ export default function App() {
 
   // Load a strategy into the editor without running
   const handleLoad = useCallback(async (strategyName: string) => {
-    const r = await fetch(`/api/strategies/${strategyName}`, { headers: getTraderHeaders() })
+    const r = await fetch(`/api/strategies/${strategyName}`, { headers: authHeaders() })
     const d = await r.json()
     setCode(d.code)
     setSavedCode(d.code)
@@ -474,14 +481,14 @@ export default function App() {
     // will close the EventSource once strategy.stopped arrives.
     setRunning(false)
     setStep('done')   // keep 'done' so the post-run panel stays visible
-    const { activeStrategyId } = useStore.getState()
-    if (activeStrategyId) {
-      fetch(`/api/strategies/${activeStrategyId}/stop`, {
+    const { activeStrategyId, activeSupervisorId } = useStore.getState()
+    if (activeStrategyId && activeSupervisorId) {
+      fetch(`/api/strategies/${activeStrategyId}/stop?supervisor_id=${encodeURIComponent(activeSupervisorId)}`, {
         method: 'POST',
-        headers: getTraderHeaders(),
+        headers: authHeaders(),
       }).catch((err) => console.error('[stop-strategy] failed:', err))
     } else {
-      console.warn('[stop] no activeStrategyId — stop_strategy not called')
+      console.warn('[stop] no activeStrategyId/activeSupervisorId — stop_strategy not called')
     }
   }, [setRunning, setStep])
 
@@ -489,6 +496,7 @@ export default function App() {
     legs: object[],
     strategyParams: Record<string, unknown>,
     currentCode: string,
+    supervisorId: string,
     startTime?: string,
     endTime?: string,
   ) => {
@@ -544,6 +552,7 @@ export default function App() {
         case 'tool_error':    addActivity({ id: nextId(), type: 'tool_error',     timestamp: ts, toolName: event.name, toolError: event.error,   durationMs: event.duration_ms, turn: event.turn }); break
         case 'strategy_submitted':
           setActiveStrategyId(event.strategy_id)
+          setActiveSupervisorId(supervisorId)
           // EventSource already opened on tool_call — don't reopen
           break
         case 'turn_complete':
@@ -566,7 +575,7 @@ export default function App() {
     }
 
     try {
-      await streamResubmit(currentCode, legs, strategyParams, handleEvent, abortRef.current.signal, undefined, startTime, endTime, modelSettings.validationProfile)
+      await streamResubmit(currentCode, legs, strategyParams, supervisorId, handleEvent, abortRef.current.signal, undefined, startTime, endTime, modelSettings.validationProfile)
     } catch (err: unknown) {
       if (err instanceof Error && err.name !== 'AbortError') {
         setStep('error')
@@ -575,9 +584,10 @@ export default function App() {
     } finally {
       if (!useStore.getState().activeStrategyId) setRunning(false)
     }
-  }, [reset, setRunning, setStep, setCode, setActiveStrategyId, openStrategyEventSource, addActivity, updateLastActivity, modelSettings])
+  }, [reset, setRunning, setStep, setCode, setActiveStrategyId, setActiveSupervisorId, openStrategyEventSource, addActivity, updateLastActivity, modelSettings])
 
-  const trader = getTrader()
+  const email = useSessionStore((s) => s.email)
+  const logout = useSessionStore((s) => s.logout)
   const [showClearRuns, setShowClearRuns] = useState(false)
 
   return (
@@ -613,13 +623,13 @@ export default function App() {
           background: isRunning ? 'var(--green)' : step === 'error' ? 'var(--red)' : 'var(--text-muted)',
           boxShadow: isRunning ? '0 0 6px var(--green)' : 'none',
         }} />
-        {trader && (
+        {email && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 8, borderLeft: '1px solid var(--border)', paddingLeft: 12 }}>
             <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
-              {trader.traderId} <span style={{ color: 'var(--text-muted)' }}>@ {trader.orgId}</span>
+              {email}
             </span>
             <button
-              onClick={() => { clearTrader(); window.location.reload() }}
+              onClick={logout}
               style={{ padding: '2px 8px', background: 'transparent', border: '1px solid var(--border)', borderRadius: 3, color: 'var(--text-muted)', fontSize: 10, cursor: 'pointer' }}
             >
               ⏏
@@ -663,7 +673,7 @@ export default function App() {
           {rightPanel === 'code' ? <CodePanel /> : rightPanel === 'qa' ? (
             <RunQA strategyId={activeStrategyId} modelSettings={modelSettings} />
           ) : (
-            <StrategyLogs strategyId={activeStrategyId} />
+            <StrategyLogs strategyId={activeStrategyId} supervisorId={activeSupervisorId} />
           )}
         </div>
       </div>

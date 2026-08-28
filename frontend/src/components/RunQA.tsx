@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { getTraderHeaders } from '../auth'
+import { authHeaders } from '../auth/cognito'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -27,7 +27,7 @@ export default function RunQA({ strategyId, modelSettings }: Props) {
 
   // Load curated analysis prompts once on mount
   useEffect(() => {
-    fetch('/api/analysis-prompts', { headers: getTraderHeaders() })
+    fetch('/api/analysis-prompts', { headers: authHeaders() })
       .then(r => r.ok ? r.json() : null)
       .then(data => { if (data?.prompts) setAnalysisPrompts(data.prompts) })
       .catch(() => {})
@@ -59,7 +59,7 @@ export default function RunQA({ strategyId, modelSettings }: Props) {
     try {
       const response = await fetch('/api/analyze-execution', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getTraderHeaders() },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({
           strategy_id: strategyId,
           question: q,
@@ -149,7 +149,7 @@ export default function RunQA({ strategyId, modelSettings }: Props) {
       ])
       fetch('/api/analyze-execution', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getTraderHeaders() },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ strategy_id: strategyId, question, history, model: modelSettings.generateModel }),
       }).then(async response => {
         if (!response.body) throw new Error('No response body')

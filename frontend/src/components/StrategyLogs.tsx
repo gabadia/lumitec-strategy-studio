@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { getTraderHeaders } from '../auth'
+import { authHeaders } from '../auth/cognito'
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g
 const SINCE_OPTIONS = ['15m', '1h', '4h', '24h'] as const
@@ -7,9 +7,10 @@ type Since = typeof SINCE_OPTIONS[number]
 
 interface Props {
   strategyId: string | null
+  supervisorId: string | null
 }
 
-export default function StrategyLogs({ strategyId }: Props) {
+export default function StrategyLogs({ strategyId, supervisorId }: Props) {
   const [lines, setLines] = useState<string[]>([])
   const [since, setSince] = useState<Since>('1h')
   const [loading, setLoading] = useState(false)
@@ -19,7 +20,7 @@ export default function StrategyLogs({ strategyId }: Props) {
   const abortRef = useRef<AbortController | null>(null)
 
   const fetchLogs = useCallback(async (sinceVal: Since) => {
-    if (!strategyId) return
+    if (!strategyId || !supervisorId) return
     abortRef.current?.abort()
     const ctrl = new AbortController()
     abortRef.current = ctrl
@@ -31,8 +32,8 @@ export default function StrategyLogs({ strategyId }: Props) {
 
     try {
       const r = await fetch(
-        `/api/strategies/${encodeURIComponent(strategyId)}/logs?since=${sinceVal}&n=200`,
-        { headers: getTraderHeaders(), signal: ctrl.signal }
+        `/api/strategies/${encodeURIComponent(strategyId)}/logs?since=${sinceVal}&n=200&supervisor_id=${encodeURIComponent(supervisorId)}`,
+        { headers: authHeaders(), signal: ctrl.signal }
       )
 
       if (!r.ok) {
@@ -64,7 +65,7 @@ export default function StrategyLogs({ strategyId }: Props) {
     } finally {
       setLoading(false)
     }
-  }, [strategyId])
+  }, [strategyId, supervisorId])
 
   // Fetch on mount / when strategyId or since changes
   useEffect(() => {

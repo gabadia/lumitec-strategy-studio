@@ -2,7 +2,7 @@ import { useState, useCallback, useRef } from 'react'
 import Editor from '@monaco-editor/react'
 import type * as MonacoType from 'monaco-editor'
 import { useStore } from '../App'
-import { getTraderHeaders } from '../auth'
+import { authHeaders } from '../auth/cognito'
 
 function ConfirmDialog({ message, onYes, onNo }: { message: string; onYes: () => void; onNo: () => void }) {
   return (
@@ -84,7 +84,7 @@ export default function CodePanel() {
     try {
       const r = await fetch(`/api/strategies/${loadedStrategyName}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json', ...getTraderHeaders() },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ code }),
       })
       if (r.ok) {
@@ -121,7 +121,7 @@ export default function CodePanel() {
     try {
       const r = await fetch(`/api/strategies/${encodeURIComponent(name)}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json', ...getTraderHeaders() },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ code }),
       })
       if (r.ok) {
@@ -159,7 +159,7 @@ export default function CodePanel() {
     try {
       const r = await fetch('/api/publish-strategy', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getTraderHeaders() },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ name: publishName, code }),
       })
       if (!r.ok) {

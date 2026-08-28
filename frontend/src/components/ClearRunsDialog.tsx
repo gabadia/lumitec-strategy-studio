@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { getTraderHeaders } from '../auth'
+import { authHeaders } from '../auth/cognito'
 
 interface RunDbEntry {
   strategy_id: string
@@ -39,7 +39,7 @@ export default function ClearRunsDialog({ onClose }: Props) {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch('/api/run-databases', { headers: getTraderHeaders() })
+      const res = await fetch('/api/run-databases', { headers: authHeaders() })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       setEntries(data.databases ?? [])
@@ -82,7 +82,7 @@ export default function ClearRunsDialog({ onClose }: Props) {
     try {
       const res = await fetch('/api/run-databases', {
         method: 'DELETE',
-        headers: { 'Content-Type': 'application/json', ...getTraderHeaders() },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ strategy_ids: Array.from(selected) }),
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)

@@ -8,6 +8,8 @@ __pycache__/
 
 # Environment — never commit real keys
 backend/.env
+frontend/.env.local
+frontend/.env.production
 
 # Frontend
 frontend/node_modules/
