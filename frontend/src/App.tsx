@@ -11,7 +11,7 @@ import LoginGate from './components/LoginGate'
 import ClearRunsDialog from './components/ClearRunsDialog'
 import type { ActivityEntry, StrategyRawEvent, StudioEvent, WorkflowStep } from './types'
 import { toolToStep } from './types'
-import { authHeaders } from './auth/cognito'
+import { authHeaders, peekIdToken } from './auth/cognito'
 import { useSessionStore } from './auth/sessionStore'
 
 // ---------------------------------------------------------------------------
@@ -243,7 +243,12 @@ export default function App() {
     }
     clearStrategyEvents()
 
-    const es = new EventSource(`/api/strategies/${strategyId}/events`)
+    // EventSource can't set an Authorization header, so the same Cognito
+    // token authHeaders() sends elsewhere goes as a query param instead —
+    // the backend requires it (see backend/main.py's api_strategy_events).
+    const token = peekIdToken()
+    const url = `/api/strategies/${strategyId}/events${token ? `?token=${encodeURIComponent(token)}` : ''}`
+    const es = new EventSource(url)
     eventSourceRef.current = es
 
     // RAF batching: buffer incoming events and flush into the store at most once per frame

@@ -173,10 +173,27 @@ def _claims_from_jwt(raw: dict) -> Claims:
     )
 
 
-async def resolve_claims(request: Request) -> Claims:
+def _extract_bearer_token(request: Request) -> str | None:
     auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
+    if auth_header.startswith("Bearer "):
+        return auth_header[len("Bearer "):].strip()
+    # EventSource (used for /strategies/{id}/events) can't set custom
+    # headers, so that route accepts the same token as a query param.
+    return request.query_params.get("token") or None
+
+
+async def resolve_claims(request: Request) -> Claims:
+    claims, _token = await resolve_claims_and_token(request)
+    return claims
+
+
+async def resolve_claims_and_token(request: Request) -> tuple[Claims, str]:
+    """Same verification as resolve_claims, but also returns the raw token -
+    needed by the strategy-events relay to forward the caller's own identity
+    upstream to the fanout in cloud mode (see main.py's api_strategy_events /
+    _iter_websocket_events)."""
+    token = _extract_bearer_token(request)
+    if not token:
         raise HTTPException(status_code=401, detail="Missing bearer token")
-    token = auth_header[len("Bearer "):].strip()
     raw_claims = await _verify_cognito_jwt(token)
-    return _claims_from_jwt(raw_claims)
+    return _claims_from_jwt(raw_claims), token

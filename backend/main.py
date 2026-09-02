@@ -36,6 +36,7 @@ import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 import aiosqlite
 import httpx
@@ -63,7 +64,7 @@ from agent import (
     DEFAULT_VALIDATE_MODEL,
     DEFAULT_MONITOR_MODEL,
 )
-from auth import resolve_claims, resolve_trading_identity
+from auth import resolve_claims, resolve_claims_and_token, resolve_trading_identity
 
 load_dotenv()
 
@@ -785,15 +786,18 @@ async def _iter_gateway_events():
                     continue
 
 
-async def _iter_websocket_events():
+async def _iter_websocket_events(token: str):
     """Yield raw parsed event dicts from the real-time WebSocket fanout
     (lumitec-desk-cloud's Kafka fanout, e.g. wss://events.clouddesk.lumitec.com/).
-    No auth handshake, no subscribe message, no per-connection filtering —
-    it broadcasts every event for every strategy; the caller filters by
-    strategy_id, same as the gateway path. Matches lumitec-desk-ui's client
+    Forwards the caller's own verified Cognito token as a `token` query
+    param — the fanout requires it at handshake and filters events down to
+    the token holder's entitled supervisors (lumitec-event-bridge
+    FanoutServer.onOpen). Matches lumitec-desk-ui's client
     (src/services/sseClient.ts) — plain WebSocket, JSON messages with a
     `type` field."""
-    async with websockets.connect(SSE_GATEWAY_URL, open_timeout=10) as ws:
+    sep = "&" if "?" in SSE_GATEWAY_URL else "?"
+    ws_url = f"{SSE_GATEWAY_URL}{sep}token={quote(token)}"
+    async with websockets.connect(ws_url, open_timeout=10) as ws:
         async for raw in ws:
             try:
                 yield json.loads(raw)
@@ -802,16 +806,24 @@ async def _iter_websocket_events():
 
 
 @app.get("/strategies/{strategy_id}/events")
-async def api_strategy_events(strategy_id: str):
+async def api_strategy_events(strategy_id: str, request: Request):
     """
     Subscribe to real-time events for a specific strategy, filtered by
     strategy_id, enriched with termination_type on terminal events, and
     streamed to the browser as SSE.
 
+    Requires a valid Cognito token — same identity the rest of Studio
+    already requires, accepted here as a `token` query param since
+    EventSource (frontend/src/App.tsx) can't set an Authorization header.
+
     Upstream source is picked by SSE_GATEWAY_URL's scheme: ws:// or wss://
-    connects to the real-time WebSocket fanout (real deployment); http:// or
-    https:// polls a local SSE gateway (order-strategy-system local dev).
+    connects to the real-time WebSocket fanout (real deployment) — the
+    caller's token is forwarded there too, since the fanout enforces its
+    own entitlement filtering. http:// or https:// polls a local SSE
+    gateway (order-strategy-system local dev) — that gateway has no auth
+    concept, so nothing is forwarded on that path.
     """
+    _claims, token = await resolve_claims_and_token(request)
     is_websocket_source = SSE_GATEWAY_URL.startswith(("ws://", "wss://"))
 
     async def event_stream():
@@ -852,7 +864,7 @@ async def api_strategy_events(strategy_id: str):
                 # Strategy already finished — no need to connect to live gateway.
                 return
 
-            event_source = _iter_websocket_events() if is_websocket_source else _iter_gateway_events()
+            event_source = _iter_websocket_events(token) if is_websocket_source else _iter_gateway_events()
             async for event in event_source:
                 # Resolve event type — skip heartbeats and empty events
                 event_type = event.get("event_type") or event.get("type", "")
