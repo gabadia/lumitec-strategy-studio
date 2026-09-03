@@ -1090,6 +1090,21 @@ def _unnest_config_classes(code: str) -> str:
     return '\n'.join(result)
 
 
+_DEV_VALIDATION_PROFILES = {"dev", "development", "research"}
+
+
+def _normalize_validation_profile(profile: str | None) -> str:
+    """Map a caller-supplied validation profile onto the validator's two profiles.
+
+    ``dev`` / ``development`` / ``research`` (case-insensitive) all mean the
+    permissive ``development`` profile; anything else (including ``prod`` and the
+    ``None``/omitted default) maps to ``production``.
+    """
+    if profile and profile.strip().lower() in _DEV_VALIDATION_PROFILES:
+        return "development"
+    return "production"
+
+
 async def _phase_submit(
     code: str,
     metadata: dict,
@@ -1186,7 +1201,7 @@ async def _phase_submit(
             ]),
             "start_time": start_iso,
             "end_time": end_iso,
-            "validation_profile": "development" if validation_profile in ("dev", "research") else "production",
+            "validation_profile": _normalize_validation_profile(validation_profile),
         }
 
         # Emit tool_call so App.tsx updates step indicator and code panel

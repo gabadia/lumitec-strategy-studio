@@ -239,6 +239,7 @@ class ResubmitStrategyRequest(BaseModel):
     start_time: str | None = None   # ISO 8601 UTC — if omitted, defaults to NYSE open
     end_time: str | None = None     # ISO 8601 UTC — if omitted, defaults to NYSE close
     supervisor_id: str              # which supervisor to submit to (e.g. "USA-1", "SPAIN-1")
+    validation_profile: str = "prod"  # dev-selected validation profile; normalized in agent.py
 
 
 class PublishStrategyRequest(BaseModel):
@@ -974,6 +975,7 @@ async def resubmit_strategy(body: ResubmitStrategyRequest, request: Request):
                 trader_id=identity.trader_id,
                 supervisor_id=body.supervisor_id,
                 auth_header=auth_header,
+                validation_profile=body.validation_profile,
             ):
                 # Initialize the run DB immediately when the strategy is accepted by the
                 # Orchestrator — before the browser opens the EventSource relay, ensuring

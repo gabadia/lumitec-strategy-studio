@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Last Updated** | 2026-09-02 |
+| **Last Updated** | 2026-09-03 |
 | **Maintained By** | Lumitec |
 | **Status** | Active development |
 
@@ -10,6 +10,7 @@
 
 | Date | Changes |
 |------|---------|
+| 2026-09-03 | **Fix: dev `validation_profile` was dropped on resubmit.** `ResubmitStrategyRequest` in `main.py` didn't declare `validation_profile`, so Pydantic silently discarded the field the frontend sends and every resubmit validated as `prod` (rejecting dev-only code like `open()`). Added the field, passed it into `run_resubmit_workflow()`, and replaced the inline ternary in `agent.py` with `_normalize_validation_profile()` — `dev`/`development`/`research` (case-insensitive) → `development`, everything else incl. `prod`/`None` → `production` (the old expression mishandled a literal `"development"`). Tests: `backend/tests/test_resubmit_validation_profile.py` (3). **NOTE:** `pytest` is not in `backend/requirements.txt` or the venv — installed ad hoc this session (`pip install pytest` into `backend/.venv`); add it to a dev-requirements file if tests become routine. |
 | 2026-09-02 | **Security fix (`4028e38`): the strategy-events SSE relay is now auth-gated.** `/strategies/{id}/events` requires a valid Cognito token, accepted as a `?token=` query param (EventSource can't send an `Authorization` header). In cloud mode `_iter_websocket_events` now forwards that token to the Kafka fanout (`wss://events.clouddesk.lumitec.com/`), which requires it at handshake and filters events by the caller's entitled supervisors (`lumitec-event-bridge`) — previously the relay connected anonymously and was almost certainly being rejected in cloud deployments. `auth.py` gained `resolve_claims_and_token()`; frontend `App.tsx` appends `peekIdToken()` to the EventSource URL. Local-mode `_iter_gateway_events` (talks to `oms-sse-gateway`, no auth concept) is unchanged. |
 | 2026-08-28 | Created this runbook. Studio's Cognito auth + real command-plane migration landed in two commits (`08bc034`, `14e432d`) — code complete, **not yet live**: the Cognito app client / web UI infra in `lumitec-desk-cloud/terraform/my.plan` has not been applied. Added prompt caching (`cache_control: ephemeral`) on the static Anthropic system prompts in `backend/agent.py`. |
 
@@ -197,6 +198,21 @@ All routes are registered **without** an `/api` prefix — the Vite dev proxy st
   connection during a simulation — not actively broken, just unguarded.
 - VSCode may show false-positive import squiggles in `agent.py`/`main.py` if the
   editor isn't pointed at `backend/.venv/bin/python` (it defaults to system Python).
+- **`duration_minutes` name collision.** `LumitecStrategyConfig`
+  (`order-strategy-system/lumitec/strategy/config.py`) reserves `duration_minutes`
+  (`0` = run indefinitely); the supervisor injects the orchestration value into
+  every strategy's `Config` (`lumitec_controller.py`). A strategy that also
+  declares its own `duration_minutes` param with a `> 0` rule (e.g. the latency
+  probe) fails to start: `Failed to start strategy …: duration_minutes must be
+  > 0`. `_phase_submit` hardcodes `"duration_minutes": 10` in the submit payload
+  regardless of the strategy's parsed value. Not yet fixed — options: Studio
+  sends the strategy's real `strategy_params["duration_minutes"]` instead of the
+  hardcode, or the strategy renames its param. Same trap applies to any other
+  name a strategy shares with a reserved `LumitecStrategyConfig` field.
+- Backend `--reload` (WatchFiles) can hang on "Waiting for connections to close"
+  when an outbound cloud-fanout WebSocket from an `/events` relay is still open;
+  kill and restart the process (`lsof -ti tcp:8089 | xargs kill -9`) rather than
+  waiting it out.
 
 ## Hard Constraints
 
