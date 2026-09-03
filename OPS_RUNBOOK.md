@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Last Updated** | 2026-08-28 |
+| **Last Updated** | 2026-09-02 |
 | **Maintained By** | Lumitec |
 | **Status** | Active development |
 
@@ -10,6 +10,7 @@
 
 | Date | Changes |
 |------|---------|
+| 2026-09-02 | **Security fix (`4028e38`): the strategy-events SSE relay is now auth-gated.** `/strategies/{id}/events` requires a valid Cognito token, accepted as a `?token=` query param (EventSource can't send an `Authorization` header). In cloud mode `_iter_websocket_events` now forwards that token to the Kafka fanout (`wss://events.clouddesk.lumitec.com/`), which requires it at handshake and filters events by the caller's entitled supervisors (`lumitec-event-bridge`) — previously the relay connected anonymously and was almost certainly being rejected in cloud deployments. `auth.py` gained `resolve_claims_and_token()`; frontend `App.tsx` appends `peekIdToken()` to the EventSource URL. Local-mode `_iter_gateway_events` (talks to `oms-sse-gateway`, no auth concept) is unchanged. |
 | 2026-08-28 | Created this runbook. Studio's Cognito auth + real command-plane migration landed in two commits (`08bc034`, `14e432d`) — code complete, **not yet live**: the Cognito app client / web UI infra in `lumitec-desk-cloud/terraform/my.plan` has not been applied. Added prompt caching (`cache_control: ephemeral`) on the static Anthropic system prompts in `backend/agent.py`. |
 
 ---
@@ -152,7 +153,7 @@ npm run dev
 | POST | `/publish-strategy` | Publish to shared strategies dir |
 | POST | `/run-strategy` | Kick off the full generate→validate→submit→simulate workflow (SSE) |
 | POST | `/strategies/{id}/stop` \| `/pause` \| `/resume` | Proxy to orchestrator |
-| GET | `/strategies/{id}/status` \| `/logs` \| `/events` | Proxy / relay from orchestrator + SSE gateway |
+| GET | `/strategies/{id}/status` \| `/logs` \| `/events` | Proxy / relay from orchestrator + SSE gateway. `/events` requires a Cognito token as a `?token=` query param (EventSource can't set a header); in cloud mode the token is forwarded to the fanout, which filters by entitlement |
 | GET | `/strategies/{id}/run-context` | Metadata for a past run |
 | GET/DELETE | `/run-databases` | List / clear run result DBs |
 | GET | `/analysis-prompts` | Curated post-run analysis prompts |
@@ -165,8 +166,10 @@ All routes are registered **without** an `/api` prefix — the Vite dev proxy st
 
 - **Cognito auth + real-infra submit flow: code complete, not yet live.**
   `backend/auth.py` and `frontend/src/auth/cognito.ts` are implemented and merged
-  (commits `08bc034`, `14e432d`), and `_phase_submit` in `agent.py` now submits
-  directly to the real orchestrator with real `account_id`/`trader_id`/`supervisor_id`.
+  (commits `08bc034`, `14e432d`, `4028e38`), and `_phase_submit` in `agent.py` now
+  submits directly to the real orchestrator with real
+  `account_id`/`trader_id`/`supervisor_id`. The strategy-events SSE relay is also
+  auth-gated now and forwards the caller's token to the cloud fanout (`4028e38`).
   However, `COGNITO_APP_CLIENT_ID` / `VITE_COGNITO_CLIENT_ID` are still blank —
   the terraform plan that creates the Studio's dedicated Cognito app client and
   web UI infra (`lumitec-desk-cloud/terraform/my.plan`, generated 2026-08-23) has

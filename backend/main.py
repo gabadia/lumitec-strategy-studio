@@ -30,6 +30,7 @@ Run DB layout (under RUNS_DIR):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -64,13 +65,40 @@ from agent import (
     DEFAULT_VALIDATE_MODEL,
     DEFAULT_MONITOR_MODEL,
 )
-from auth import resolve_claims, resolve_claims_and_token, resolve_trading_identity
+from auth import (
+    resolve_claims,
+    resolve_claims_and_token_allow_query,
+    resolve_trading_identity,
+)
 
 load_dotenv()
 
 SSE_GATEWAY_URL = os.getenv("SSE_GATEWAY_URL", "http://localhost:9001")
 STRATEGY_SERVER_URL = os.getenv("STRATEGY_SERVER_URL", "http://localhost:8001")
 STRATEGY_SERVER_PUBLISH_PATH = os.getenv("STRATEGY_SERVER_PUBLISH_PATH", "/strategies/publish")
+
+
+class _RedactTokenQueryParam(logging.Filter):
+    """Redact `token=<jwt>` from uvicorn access-log records.
+
+    GET /strategies/{id}/events takes the caller's Cognito token as a query
+    param (EventSource can't send an Authorization header); without this the
+    full JWT is written to stdout on every SSE connection. Access logging
+    stays on for every route — only the credential value is masked.
+    """
+
+    _TOKEN_RE = re.compile(r"(token=)[^&\s\"]+")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.args:
+            record.args = tuple(
+                self._TOKEN_RE.sub(r"\1REDACTED", arg) if isinstance(arg, str) else arg
+                for arg in record.args
+            )
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_RedactTokenQueryParam())
 
 app = FastAPI(title="Lumitec Strategy Studio")
 
@@ -823,7 +851,7 @@ async def api_strategy_events(strategy_id: str, request: Request):
     gateway (order-strategy-system local dev) — that gateway has no auth
     concept, so nothing is forwarded on that path.
     """
-    _claims, token = await resolve_claims_and_token(request)
+    _claims, token = await resolve_claims_and_token_allow_query(request)
     is_websocket_source = SSE_GATEWAY_URL.startswith(("ws://", "wss://"))
 
     async def event_stream():

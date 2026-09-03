@@ -177,23 +177,35 @@ def _extract_bearer_token(request: Request) -> str | None:
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         return auth_header[len("Bearer "):].strip()
-    # EventSource (used for /strategies/{id}/events) can't set custom
-    # headers, so that route accepts the same token as a query param.
-    return request.query_params.get("token") or None
+    return None
 
 
-async def resolve_claims(request: Request) -> Claims:
-    claims, _token = await resolve_claims_and_token(request)
-    return claims
-
-
-async def resolve_claims_and_token(request: Request) -> tuple[Claims, str]:
-    """Same verification as resolve_claims, but also returns the raw token -
-    needed by the strategy-events relay to forward the caller's own identity
-    upstream to the fanout in cloud mode (see main.py's api_strategy_events /
-    _iter_websocket_events)."""
-    token = _extract_bearer_token(request)
+async def _verified(token: str | None) -> tuple[Claims, str]:
     if not token:
         raise HTTPException(status_code=401, detail="Missing bearer token")
     raw_claims = await _verify_cognito_jwt(token)
     return _claims_from_jwt(raw_claims), token
+
+
+async def resolve_claims(request: Request) -> Claims:
+    claims, _token = await _verified(_extract_bearer_token(request))
+    return claims
+
+
+async def resolve_claims_and_token(request: Request) -> tuple[Claims, str]:
+    """Verify the caller's bearer JWT (Authorization header only) and return
+    the parsed claims plus the raw token — the raw token is needed by the
+    strategy-events relay to forward the caller's own identity upstream to
+    the fanout in cloud mode (see main.py's api_strategy_events /
+    _iter_websocket_events)."""
+    return await _verified(_extract_bearer_token(request))
+
+
+async def resolve_claims_and_token_allow_query(request: Request) -> tuple[Claims, str]:
+    """Like resolve_claims_and_token, but also accepts the token as a
+    `token` query param. ONLY for GET /strategies/{id}/events, which the
+    browser reaches via EventSource — that API can't set an Authorization
+    header. Query-param tokens are more exposure-prone than headers (access
+    logs, browser history, proxies), so no other route should use this."""
+    token = _extract_bearer_token(request) or request.query_params.get("token")
+    return await _verified(token)
