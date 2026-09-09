@@ -245,6 +245,7 @@ class ResubmitStrategyRequest(BaseModel):
 class PublishStrategyRequest(BaseModel):
     name: str
     code: str
+    visibility: str = "private"   # private | shared | public | platform — validated by the strategy server
 
 
 class AskRunRequest(BaseModel):
@@ -1013,6 +1014,10 @@ async def publish_strategy(body: PublishStrategyRequest, request: Request):
         "code": body.code,
         "file_name": file_name,
         "display_name": body.name,
+        # owner/account/org are derived server-side from the Cognito token — only
+        # visibility is caller-chosen. Forward as-is; the strategy server 422s an
+        # unknown value and 403s a "platform" publish without platform-admins.
+        "visibility": body.visibility,
     }
     # strategy_server resolves identity from the Cognito claims API Gateway
     # injects for a verified bearer token, not from these X- headers — kept
@@ -1043,6 +1048,7 @@ async def publish_strategy(body: PublishStrategyRequest, request: Request):
         "published": True,
         "name": body.name,
         "file_name": file_name,
+        "visibility": body.visibility,
         "source": "strategy_server",
         "org_id": org_id,
         "trader_id": trader_id,

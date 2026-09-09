@@ -53,7 +53,10 @@ export default function CodePanel() {
   const [publishing, setPublishing] = useState(false)
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle')
   const [publishStatus, setPublishStatus] = useState<'idle' | 'ok' | 'error'>('idle')
+  const [publishError, setPublishError] = useState<string | null>(null)
   const [publishedName, setPublishedName] = useState<string | null>(null)
+  // "platform" is admin-assigned only — deliberately not offered in the Studio UI.
+  const [visibility, setVisibility] = useState<'private' | 'shared' | 'public'>('private')
   const [showCloseConfirm, setShowCloseConfirm] = useState(false)
 
   const isDirty = loadedStrategyName !== null && code !== savedCode
@@ -155,16 +158,18 @@ export default function CodePanel() {
 
     setPublishing(true)
     setPublishStatus('idle')
+    setPublishError(null)
     setPublishedName(null)
     try {
       const r = await fetch('/api/publish-strategy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ name: publishName, code }),
+        body: JSON.stringify({ name: publishName, code, visibility }),
       })
       if (!r.ok) {
+        setPublishError(r.status === 403 ? `✗ "${visibility}" visibility not permitted` : '✗ publish failed')
         setPublishStatus('error')
-        setTimeout(() => setPublishStatus('idle'), 4000)
+        setTimeout(() => { setPublishStatus('idle'); setPublishError(null) }, 4000)
         return
       }
 
@@ -174,12 +179,13 @@ export default function CodePanel() {
       setPublishStatus('ok')
       setTimeout(() => setPublishStatus('idle'), 6000)
     } catch {
+      setPublishError('✗ publish failed')
       setPublishStatus('error')
-      setTimeout(() => setPublishStatus('idle'), 4000)
+      setTimeout(() => { setPublishStatus('idle'); setPublishError(null) }, 4000)
     } finally {
       setPublishing(false)
     }
-  }, [code, publishing, inferDefaultName, loadedStrategyName])
+  }, [code, publishing, inferDefaultName, loadedStrategyName, visibility])
 
   const doClose = useCallback(() => {
     setCode('')
@@ -233,7 +239,7 @@ export default function CodePanel() {
           </span>
         )}
         {publishStatus === 'error' && (
-          <span style={{ fontSize: 10, color: 'var(--red)', fontFamily: 'var(--font-mono)' }}>✗ publish failed</span>
+          <span style={{ fontSize: 10, color: 'var(--red)', fontFamily: 'var(--font-mono)' }}>{publishError ?? '✗ publish failed'}</span>
         )}
 
         {/* Unsaved indicator */}
@@ -283,6 +289,28 @@ export default function CodePanel() {
                 {saving ? 'Saving…' : 'Save'}
               </button>
             )}
+
+            <select
+              value={visibility}
+              onChange={(e) => setVisibility(e.target.value as 'private' | 'shared' | 'public')}
+              disabled={publishing || saving}
+              title="Who can see this strategy once published"
+              style={{
+                padding: '2px 4px',
+                background: 'var(--surface-2)',
+                border: '1px solid var(--border)',
+                borderRadius: 3,
+                color: publishing || saving ? 'var(--text-muted)' : 'var(--text-dim)',
+                fontSize: 11,
+                fontFamily: 'var(--font-mono)',
+                fontWeight: 600,
+                cursor: publishing || saving ? 'default' : 'pointer',
+              }}
+            >
+              <option value="private">private</option>
+              <option value="shared">shared</option>
+              <option value="public">public</option>
+            </select>
 
             <button
               onClick={publish}

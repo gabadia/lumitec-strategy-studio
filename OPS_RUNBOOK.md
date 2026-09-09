@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Last Updated** | 2026-09-03 |
+| **Last Updated** | 2026-09-09 |
 | **Maintained By** | Lumitec |
 | **Status** | Active development |
 
@@ -10,6 +10,7 @@
 
 | Date | Changes |
 |------|---------|
+| 2026-09-09 | **Publish visibility forwarding.** The strategy server gained a per-strategy visibility model (`private`/`shared`/`public`/`platform`). `PublishStrategyRequest` now carries `visibility` (default `private`); `publish_strategy` forwards it verbatim in the publish payload (identity stays server-derived from Cognito). `CodePanel.tsx` adds a `private`/`shared`/`public` selector next to Publish (`platform` deliberately omitted — admin-assigned only), sends `visibility` in the body, and shows a `"…visibility not permitted"` message on a 403. Tests: `backend/tests/test_publish_visibility.py` (3). **End-to-end verify (publish each value on the live server + cross-org read) still pending — needs live Cognito auth + two org-scoped users.** |
 | 2026-09-03 | **Fix: dev `validation_profile` was dropped on resubmit.** `ResubmitStrategyRequest` in `main.py` didn't declare `validation_profile`, so Pydantic silently discarded the field the frontend sends and every resubmit validated as `prod` (rejecting dev-only code like `open()`). Added the field, passed it into `run_resubmit_workflow()`, and replaced the inline ternary in `agent.py` with `_normalize_validation_profile()` — `dev`/`development`/`research` (case-insensitive) → `development`, everything else incl. `prod`/`None` → `production` (the old expression mishandled a literal `"development"`). Tests: `backend/tests/test_resubmit_validation_profile.py` (3). **NOTE:** `pytest` is not in `backend/requirements.txt` or the venv — installed ad hoc this session (`pip install pytest` into `backend/.venv`); add it to a dev-requirements file if tests become routine. |
 | 2026-09-02 | **Security fix (`4028e38`): the strategy-events SSE relay is now auth-gated.** `/strategies/{id}/events` requires a valid Cognito token, accepted as a `?token=` query param (EventSource can't send an `Authorization` header). In cloud mode `_iter_websocket_events` now forwards that token to the Kafka fanout (`wss://events.clouddesk.lumitec.com/`), which requires it at handshake and filters events by the caller's entitled supervisors (`lumitec-event-bridge`) — previously the relay connected anonymously and was almost certainly being rejected in cloud deployments. `auth.py` gained `resolve_claims_and_token()`; frontend `App.tsx` appends `peekIdToken()` to the EventSource URL. Local-mode `_iter_gateway_events` (talks to `oms-sse-gateway`, no auth concept) is unchanged. |
 | 2026-08-28 | Created this runbook. Studio's Cognito auth + real command-plane migration landed in two commits (`08bc034`, `14e432d`) — code complete, **not yet live**: the Cognito app client / web UI infra in `lumitec-desk-cloud/terraform/my.plan` has not been applied. Added prompt caching (`cache_control: ephemeral`) on the static Anthropic system prompts in `backend/agent.py`. |
@@ -151,7 +152,7 @@ npm run dev
 | GET/PUT | `/strategies`, `/strategies/{name}` | List / load / save strategy source |
 | POST | `/parse-strategy` | Parse pasted code into metadata |
 | POST | `/resubmit-strategy` | Re-run submit for existing code |
-| POST | `/publish-strategy` | Publish to shared strategies dir |
+| POST | `/publish-strategy` | Publish current code to the strategy server. Body takes `visibility` (`private` default \| `shared` \| `public` \| `platform`) forwarded as-is in the payload; owner/account/org are derived server-side from the Cognito token. Server 422s an unknown value, 403s a `platform` publish without `platform-admins`. Studio UI offers `private`/`shared`/`public` only |
 | POST | `/run-strategy` | Kick off the full generate→validate→submit→simulate workflow (SSE) |
 | POST | `/strategies/{id}/stop` \| `/pause` \| `/resume` | Proxy to orchestrator |
 | GET | `/strategies/{id}/status` \| `/logs` \| `/events` | Proxy / relay from orchestrator + SSE gateway. `/events` requires a Cognito token as a `?token=` query param (EventSource can't set a header); in cloud mode the token is forwarded to the fanout, which filters by entitlement |
