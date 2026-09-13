@@ -38,6 +38,52 @@ function ConfirmDialog({ message, onYes, onNo }: { message: string; onYes: () =>
   )
 }
 
+type PublishFieldError = { phase?: string; message: string; line?: number }
+
+function AlertDialog({
+  title, message, errors, onOk,
+}: { title: string; message: string; errors?: PublishFieldError[]; onOk: () => void }) {
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 1000,
+      background: 'rgba(0,0,0,0.6)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }}>
+      <div style={{
+        background: 'var(--surface)',
+        border: '1px solid var(--border)',
+        borderRadius: 6,
+        padding: '20px 24px',
+        minWidth: 320,
+        maxWidth: 500,
+        display: 'flex', flexDirection: 'column', gap: 14,
+      }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>{title}</div>
+        <div style={{ fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{message}</div>
+        {errors && errors.length > 0 && (
+          <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {errors.map((e, i) => (
+              <li key={i} style={{
+                fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--red)',
+                background: 'var(--surface-2)', border: '1px solid var(--border)',
+                borderRadius: 4, padding: '6px 8px', lineHeight: 1.4,
+              }}>
+                {e.phase ? `[${e.phase}] ` : ''}{e.message}{e.line != null ? `  (line ${e.line})` : ''}
+              </li>
+            ))}
+          </ul>
+        )}
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <button onClick={onOk} style={{
+            padding: '5px 18px', borderRadius: 4, fontSize: 12, fontWeight: 600,
+            background: 'var(--accent)', border: 'none', color: '#fff', cursor: 'pointer',
+          }}>OK</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function CodePanel() {
   const code = useStore((s) => s.code)
   const savedCode = useStore((s) => s.savedCode)
@@ -52,9 +98,15 @@ export default function CodePanel() {
   const [saving, setSaving] = useState(false)
   const [publishing, setPublishing] = useState(false)
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle')
-  const [publishStatus, setPublishStatus] = useState<'idle' | 'ok' | 'error'>('idle')
-  const [publishError, setPublishError] = useState<string | null>(null)
-  const [publishedName, setPublishedName] = useState<string | null>(null)
+  const [publishStatus, setPublishStatus] = useState<'idle' | 'ok'>('idle')
+  const [publishInfo, setPublishInfo] = useState<
+    { name: string; version?: string; revision?: number; visibility?: string } | null
+  >(null)
+  // Blocking failure dialog — publish is deliberate + infrequent, so a failure
+  // must be acknowledged rather than flashing past as a toast.
+  const [publishAlert, setPublishAlert] = useState<
+    { title: string; message: string; errors: PublishFieldError[] } | null
+  >(null)
   // "platform" is admin-assigned only — deliberately not offered in the Studio UI.
   const [visibility, setVisibility] = useState<'private' | 'shared' | 'public'>('private')
   const [showCloseConfirm, setShowCloseConfirm] = useState(false)
@@ -158,30 +210,45 @@ export default function CodePanel() {
 
     setPublishing(true)
     setPublishStatus('idle')
-    setPublishError(null)
-    setPublishedName(null)
+    setPublishInfo(null)
     try {
       const r = await fetch('/api/publish-strategy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ name: publishName, code, visibility }),
       })
+      const data = await r.json().catch(() => null)
+
       if (!r.ok) {
-        setPublishError(r.status === 403 ? `✗ "${visibility}" visibility not permitted` : '✗ publish failed')
-        setPublishStatus('error')
-        setTimeout(() => { setPublishStatus('idle'); setPublishError(null) }, 4000)
+        // backend wraps the strategy server's reply as { detail: { error } };
+        // `error` is either a string or { message, errors: [{phase,message,line}] }
+        const err = data?.detail?.error ?? data?.detail ?? data
+        let message = `Publish failed (HTTP ${r.status}).`
+        let errors: PublishFieldError[] = []
+        if (typeof err === 'string') {
+          message = err
+        } else if (err && typeof err === 'object') {
+          if (typeof err.message === 'string') message = err.message
+          if (Array.isArray(err.errors)) errors = err.errors as PublishFieldError[]
+        }
+        setPublishAlert({ title: 'Publish failed', message, errors })
         return
       }
 
-      const data = await r.json()
-      const name = typeof data?.name === 'string' ? data.name : publishName
-      setPublishedName(name)
+      setPublishInfo({
+        name: typeof data?.name === 'string' ? data.name : publishName,
+        version: data?.upstream?.user_version,
+        revision: data?.upstream?.revision,
+        visibility: data?.visibility ?? visibility,
+      })
       setPublishStatus('ok')
-      setTimeout(() => setPublishStatus('idle'), 6000)
+      setTimeout(() => setPublishStatus('idle'), 8000)
     } catch {
-      setPublishError('✗ publish failed')
-      setPublishStatus('error')
-      setTimeout(() => { setPublishStatus('idle'); setPublishError(null) }, 4000)
+      setPublishAlert({
+        title: 'Publish failed',
+        message: 'Could not reach the Studio backend. Check that it is running and try again.',
+        errors: [],
+      })
     } finally {
       setPublishing(false)
     }
@@ -221,6 +288,14 @@ export default function CodePanel() {
           onNo={handleConfirmNo}
         />
       )}
+      {publishAlert && (
+        <AlertDialog
+          title={publishAlert.title}
+          message={publishAlert.message}
+          errors={publishAlert.errors}
+          onOk={() => setPublishAlert(null)}
+        />
+      )}
       {/* Top-right badge row */}
       <div style={{
         position: 'absolute', top: 8, right: 12, zIndex: 10,
@@ -233,13 +308,17 @@ export default function CodePanel() {
         {saveStatus === 'error' && (
           <span style={{ fontSize: 10, color: 'var(--red)', fontFamily: 'var(--font-mono)' }}>✗ save failed</span>
         )}
-        {publishStatus === 'ok' && (
-          <span style={{ fontSize: 10, color: 'var(--green)', fontFamily: 'var(--font-mono)' }}>
-            ✓ published{publishedName ? `: ${publishedName}` : ''}
+        {publishStatus === 'ok' && publishInfo && (
+          <span
+            onClick={() => setPublishStatus('idle')}
+            title="dismiss"
+            style={{ fontSize: 10, color: 'var(--green)', fontFamily: 'var(--font-mono)', cursor: 'pointer' }}
+          >
+            ✓ published {publishInfo.name}
+            {publishInfo.version ? ` · v${publishInfo.version}` : ''}
+            {publishInfo.revision != null ? ` rev ${publishInfo.revision}` : ''}
+            {publishInfo.visibility ? ` · ${publishInfo.visibility}` : ''}
           </span>
-        )}
-        {publishStatus === 'error' && (
-          <span style={{ fontSize: 10, color: 'var(--red)', fontFamily: 'var(--font-mono)' }}>{publishError ?? '✗ publish failed'}</span>
         )}
 
         {/* Unsaved indicator */}

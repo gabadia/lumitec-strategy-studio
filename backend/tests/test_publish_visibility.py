@@ -93,3 +93,26 @@ def test_strategy_server_403_is_surfaced(monkeypatch):
     _install(monkeypatch, reply=_FakeResponse(403, {"detail": "requires platform-admin access"}))
     resp = _post("platform")
     assert resp.status_code == 403
+    # {"detail": "<str>"} from the server is unwrapped one level into error
+    assert resp.json()["detail"]["error"] == "requires platform-admin access"
+
+
+def test_validator_errors_are_forwarded_structured(monkeypatch):
+    server_body = {
+        "detail": {
+            "message": "Strategy validation failed",
+            "validation_profile": "production",
+            "errors": [
+                {"code": "security_forbidden_builtin", "phase": "security",
+                 "message": "Use of built-in 'open()' is not permitted in strategies.",
+                 "line": 586, "col": 25, "detail": None},
+            ],
+        }
+    }
+    _install(monkeypatch, reply=_FakeResponse(422, server_body))
+    resp = _post("private")
+    assert resp.status_code == 422
+    err = resp.json()["detail"]["error"]
+    assert err["message"] == "Strategy validation failed"
+    assert err["errors"][0]["phase"] == "security"
+    assert err["errors"][0]["line"] == 586

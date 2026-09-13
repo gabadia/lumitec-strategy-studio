@@ -1035,8 +1035,23 @@ async def publish_strategy(body: PublishStrategyRequest, request: Request):
         raise HTTPException(status_code=502, detail=f"Failed to reach strategy server: {exc}")
 
     if response.status_code not in (200, 201):
-        detail = response.text[:2000] if response.text else f"HTTP {response.status_code}"
-        raise HTTPException(status_code=response.status_code, detail=f"Strategy server publish failed: {detail}")
+        # Forward the strategy server's own error structure so the UI can render
+        # it (validator errors carry {phase, message, line}); the server wraps its
+        # payload in {"detail": ...} — unwrap that one level.
+        try:
+            upstream_err = response.json()
+        except Exception:
+            upstream_err = {"message": response.text[:2000] or f"HTTP {response.status_code}"}
+        if isinstance(upstream_err, dict) and set(upstream_err) == {"detail"}:
+            upstream_err = upstream_err["detail"]
+        raise HTTPException(
+            status_code=response.status_code,
+            detail={
+                "source": "strategy_server",
+                "upstream_status": response.status_code,
+                "error": upstream_err,
+            },
+        )
 
     try:
         upstream = response.json()
