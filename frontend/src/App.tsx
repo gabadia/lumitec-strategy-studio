@@ -624,7 +624,7 @@ export default function App() {
         <button
           onClick={() => setShowClearRuns(true)}
           title="Manage run databases"
-          style={{ padding: '3px 10px', background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--text-dim)', fontSize: 11, cursor: 'pointer' }}
+          style={{ padding: '3px 10px', background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--text)', fontSize: 11, cursor: 'pointer' }}
         >
           🗄 Runs
         </button>

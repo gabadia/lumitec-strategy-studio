@@ -326,7 +326,7 @@ export default function IntentInput({ onRun, onLoad, onOpenPublished, onStop, on
               fontWeight: 600,
               letterSpacing: '0.05em',
               background: mode === m ? 'var(--accent-dim)' : 'transparent',
-              color: mode === m ? 'var(--accent)' : 'var(--text-muted)',
+              color: mode === m ? 'var(--accent)' : 'var(--text-dim)',
               border: `1px solid ${mode === m ? 'var(--accent)' : 'var(--border)'}`,
               cursor: isRunning ? 'default' : 'pointer',
             }}
@@ -345,7 +345,7 @@ export default function IntentInput({ onRun, onLoad, onOpenPublished, onStop, on
             fontFamily: 'var(--font-mono)',
             fontWeight: 600,
             background: showModels ? 'var(--accent-dim)' : 'transparent',
-            color: showModels ? 'var(--accent)' : 'var(--text-muted)',
+            color: showModels ? 'var(--accent)' : 'var(--text-dim)',
             border: `1px solid ${showModels ? 'var(--accent)' : 'var(--border)'}`,
             cursor: 'pointer',
           }}

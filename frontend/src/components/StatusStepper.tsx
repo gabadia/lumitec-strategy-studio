@@ -27,7 +27,6 @@ export default function StatusStepper({ step }: Props) {
         const idx = ORDER.indexOf(key)
         const isDone = current > idx || step === 'done'
         const isActive = step === key
-        const isPending = current < idx && step !== 'error'
 
         return (
           <div key={key} style={{ display: 'flex', alignItems: 'center' }}>
@@ -42,7 +41,7 @@ export default function StatusStepper({ step }: Props) {
               fontWeight: 600,
               letterSpacing: '0.05em',
               background: isActive ? 'var(--accent-dim)' : isDone ? '#1a2e1a' : 'transparent',
-              color: isActive ? 'var(--accent)' : isDone ? 'var(--green)' : isPending ? 'var(--text-muted)' : 'var(--text-dim)',
+              color: isActive ? 'var(--accent)' : isDone ? 'var(--green)' : 'var(--text-dim)',
               border: `1px solid ${isActive ? 'var(--accent)' : isDone ? 'var(--green)' : 'transparent'}`,
               transition: 'all 0.2s',
             }}>
