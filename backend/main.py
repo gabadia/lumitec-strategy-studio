@@ -1071,6 +1071,96 @@ async def publish_strategy(body: PublishStrategyRequest, request: Request):
     }
 
 
+# ---------------------------------------------------------------------------
+# Published-strategy library (read-only proxy to the strategy server registry).
+# Studio is the sole writer to the registry; the "Browse Agents" panel and the
+# agent desk only read. These endpoints forward the caller's bearer token; the
+# strategy server does its own _authorize (owner / org-shared / public / platform).
+# ---------------------------------------------------------------------------
+
+def _classify_published(row: dict, *, my_email: str, my_sub: str) -> tuple[bool, str]:
+    """Tag a strategy-server LATEST row for the library UI.
+
+    The server stamps ``owner_user`` = Cognito email (falling back to sub).
+    group ∈ {mine, org, public, platform, other}.
+    """
+    owner = (row.get("owner_user") or "").strip()
+    if owner and owner in (my_email, my_sub):
+        return True, "mine"
+    visibility = row.get("visibility") or "private"
+    if (row.get("source") or "user") == "platform" or visibility == "platform":
+        return False, "platform"
+    if visibility == "public":
+        return False, "public"
+    if visibility == "shared":
+        return False, "org"
+    return False, "other"
+
+
+@app.get("/published-strategies")
+async def list_published_strategies(request: Request):
+    """List registry entries visible to the caller, each tagged mine/group."""
+    claims = await resolve_claims(request)
+    url = STRATEGY_SERVER_URL.rstrip("/")   # .../api/strategies → server GET /strategies
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, headers=_auth_headers(request))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to reach strategy server: {exc}")
+    if response.status_code != 200:
+        detail = response.text[:2000] if response.text else f"HTTP {response.status_code}"
+        raise HTTPException(status_code=response.status_code, detail=f"Strategy server list failed: {detail}")
+    body = response.json()
+    rows = body.get("strategies", []) if isinstance(body, dict) else (body or [])
+    my_email = claims.email or ""
+    my_sub = claims.sub or ""
+    out = []
+    for row in rows:
+        mine, group = _classify_published(row, my_email=my_email, my_sub=my_sub)
+        out.append({**row, "mine": mine, "group": group})
+    return {"strategies": out, "count": len(out)}
+
+
+@app.get("/published-strategies/{sid}")
+async def get_published_strategy(sid: str, request: Request):
+    """Merge a registry entry's metadata + source for opening in the editor."""
+    _check_id(sid, "strategy_id")
+    await resolve_claims(request)
+    base = STRATEGY_SERVER_URL.rstrip("/")
+    headers = _auth_headers(request)
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            meta_r = await client.get(f"{base}/{sid}", headers=headers)
+            code_r = await client.get(f"{base}/{sid}/code", headers=headers)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to reach strategy server: {exc}")
+    if meta_r.status_code != 200:
+        detail = meta_r.text[:2000] if meta_r.text else f"HTTP {meta_r.status_code}"
+        raise HTTPException(status_code=meta_r.status_code, detail=f"Strategy server get failed: {detail}")
+    meta = meta_r.json()
+    code_payload = code_r.json() if code_r.status_code == 200 else {}
+    return {
+        "strategy_id": sid,
+        "display_name": meta.get("display_name"),
+        "class_name": meta.get("class_name") or code_payload.get("class_name"),
+        "visibility": meta.get("visibility"),
+        "owner_user": meta.get("owner_user"),
+        "organization": meta.get("organization"),
+        "user_version": meta.get("user_version") or code_payload.get("user_version"),
+        "revision": meta.get("revision") if meta.get("revision") is not None else code_payload.get("revision"),
+        "strategy_hash": meta.get("strategy_hash") or code_payload.get("strategy_hash"),
+        "execution_mode": meta.get("execution_mode") or code_payload.get("execution_mode") or "inline_code",
+        "package_path": meta.get("package_path") or code_payload.get("package_path"),
+        "code": code_payload.get("code", ""),
+        "params": meta.get("params"),
+        "leg_schema": meta.get("leg_schema"),
+        "mission": meta.get("mission"),
+        "objective": meta.get("objective"),
+        "created_at": meta.get("created_at"),
+        "updated_at": meta.get("updated_at"),
+    }
+
+
 @app.post("/run-strategy")
 async def run_strategy(request: RunStrategyRequest):
     """

@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef, KeyboardEvent } from 'react'
+import type React from 'react'
 import { authHeaders } from '../auth/cognito'
 import { useStore } from '../App'
 import type { ModelSettings } from '../App'
@@ -25,6 +26,7 @@ const SUPERVISORS = ['USA-1', 'SPAIN-1']
 interface Props {
   onRun: (intent: string, strategyName?: string, existingCode?: string, workflowMode?: string) => void
   onLoad: (strategyName: string) => void
+  onOpenPublished: (strategyId: string) => void | Promise<void>
   onStop: () => void
   onResubmit: (legs: object[], strategyParams: Record<string, unknown>, code: string, supervisorId: string, startTime: string, endTime: string) => void
   isRunning: boolean
@@ -90,11 +92,33 @@ function ActionButton({ label, onClick, enabled }: { label: string; onClick: () 
   )
 }
 
-export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunning, editorCode, modelSettings, onModelSettingsChange }: Props) {
+interface PublishedAgent {
+  strategy_id: string
+  display_name?: string
+  class_name?: string
+  visibility?: string
+  source?: string
+  user_version?: string
+  revision?: number
+  execution_mode?: string
+  mine?: boolean
+}
+
+// Mirror the desk's NewStrategyDialog grouping so both pickers read the same.
+function publishedGroup(r: PublishedAgent): 'My Agents' | 'Public Agents' | 'Platform Agents' {
+  if (r.visibility === 'platform' || r.source === 'platform') return 'Platform Agents'
+  if (r.mine && r.visibility !== 'public') return 'My Agents'
+  return 'Public Agents'
+}
+
+export default function IntentInput({ onRun, onLoad, onOpenPublished, onStop, onResubmit, isRunning, editorCode, modelSettings, onModelSettingsChange }: Props) {
   const [intent, setIntent] = useState('')
   const [mode, setMode] = useState<Mode>('prompt')
   const [strategies, setStrategies] = useState<StrategyEntry[]>([])
   const [selected, setSelected] = useState<string>('')
+  const [published, setPublished] = useState<PublishedAgent[]>([])
+  const [pubSelected, setPubSelected] = useState<string>('')
+  const [pubBusy, setPubBusy] = useState(false)
   const [codeName, setCodeName] = useState<string>('')
   const [busy, setBusy] = useState(false)
   const [showModels, setShowModels] = useState(false)
@@ -195,6 +219,26 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
       .then((d) => setStrategies(d.strategies ?? []))
       .catch(() => {})
   }, [mode, strategies.length])
+
+  useEffect(() => {
+    if (mode !== 'existing' || published.length > 0) return
+    fetch('/api/published-strategies', { headers: authHeaders() })
+      .then((r) => (r.ok ? r.json() : { strategies: [] }))
+      .then((d) => setPublished(d.strategies ?? []))
+      .catch(() => {})
+  }, [mode, published.length])
+
+  const handleOpenPublished = useCallback(async (strategyId: string) => {
+    if (!strategyId || isRunning || pubBusy) return
+    setPubBusy(true)
+    try {
+      await onOpenPublished(strategyId)
+      setShowFeedback(true)
+    } finally {
+      setPubBusy(false)
+      setPubSelected('')
+    }
+  }, [isRunning, pubBusy, onOpenPublished])
 
   const handleLoad = useCallback(async () => {
     if (!selected || isRunning || busy) return
@@ -376,45 +420,86 @@ export default function IntentInput({ onRun, onLoad, onStop, onResubmit, isRunni
       }}>
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
 
-          {/* EXISTING: dropdown + buttons */}
-          {mode === 'existing' && (
-            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-              <select
-                value={selected}
-                onChange={(e) => setSelected(e.target.value)}
-                disabled={isRunning}
-                style={{
-                  width: 'fit-content',
-                  maxWidth: '100%',
-                  background: 'var(--surface)',
-                  border: '1px solid var(--border)',
-                  borderRadius: 4,
-                  color: selected ? 'var(--text)' : 'var(--text-muted)',
-                  padding: '5px 8px',
-                  fontSize: 12,
-                  fontFamily: 'var(--font-mono)',
-                  cursor: 'pointer',
-                }}
-              >
-                <option value="">— select a strategy —</option>
-                {strategies.map((s) => (
-                  <option key={s.name} value={s.name}>
-                    {s.name}{s.source === 'shared' ? ' (shared)' : ''}
-                  </option>
-                ))}
-              </select>
+          {/* EXISTING: Sandbox + Published Agents selectors, side by side */}
+          {mode === 'existing' && (() => {
+            const selStyle: React.CSSProperties = {
+              maxWidth: '100%',
+              background: 'var(--surface)',
+              border: '1px solid var(--border)',
+              borderRadius: 4,
+              padding: '5px 8px',
+              fontSize: 12,
+              fontFamily: 'var(--font-mono)',
+              cursor: 'pointer',
+            }
+            const caption: React.CSSProperties = {
+              fontSize: 10, letterSpacing: '0.1em', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)',
+            }
+            const hasShared = published.some((p) => p.visibility === 'shared')
+            return (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <span style={caption}>SANDBOX</span>
+                    <select
+                      value={selected}
+                      onChange={(e) => setSelected(e.target.value)}
+                      disabled={isRunning}
+                      style={{ ...selStyle, color: selected ? 'var(--text)' : 'var(--text-dim)' }}
+                    >
+                      <option value="">— local strategy —</option>
+                      {strategies.map((s) => (
+                        <option key={s.name} value={s.name}>
+                          {s.name}{s.source === 'shared' ? ' (shared)' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-              {isRunning ? (
-                <StopButton onClick={onStop} />
-              ) : (
-                <>
-                  <ActionButton label={busy ? 'Loading…' : 'Load'}     onClick={handleLoad}                    enabled={!!selected && !busy} />
-                  <ActionButton label="Fast Run"                         onClick={() => runWithMode('fast')} enabled={canAct} />
-                  <ActionButton label="Full Run"                         onClick={() => runWithMode('full')} enabled={canAct} />
-                </>
-              )}
-            </div>
-          )}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <span style={caption}>PUBLISHED AGENTS</span>
+                    <select
+                      value={pubSelected}
+                      onChange={(e) => { setPubSelected(e.target.value); if (e.target.value) handleOpenPublished(e.target.value) }}
+                      disabled={isRunning || pubBusy}
+                      style={{ ...selStyle, color: pubSelected ? 'var(--text)' : 'var(--text-dim)' }}
+                    >
+                      <option value="">{pubBusy ? 'Opening…' : '— open a copy —'}</option>
+                      {(['My Agents', 'Public Agents', 'Platform Agents'] as const).map((label) => {
+                        const list = published.filter(
+                          (p) => publishedGroup(p) === label && p.execution_mode !== 'package_path',
+                        )
+                        return list.length === 0 ? null : (
+                          <optgroup key={label} label={label}>
+                            {list.map((p) => (
+                              <option key={p.strategy_id} value={p.strategy_id}>
+                                {(p.display_name ?? p.strategy_id)}
+                                {p.visibility === 'shared' ? ' *' : ''}
+                                {p.user_version ? `  ·  v${p.user_version}` : ''}
+                              </option>
+                            ))}
+                          </optgroup>
+                        )
+                      })}
+                    </select>
+                  </div>
+
+                  {isRunning ? (
+                    <StopButton onClick={onStop} />
+                  ) : (
+                    <>
+                      <ActionButton label={busy ? 'Loading…' : 'Load'}  onClick={handleLoad}                enabled={!!selected && !busy} />
+                      <ActionButton label="Fast Run"                     onClick={() => runWithMode('fast')} enabled={canAct} />
+                      <ActionButton label="Full Run"                     onClick={() => runWithMode('full')} enabled={canAct} />
+                    </>
+                  )}
+                </div>
+                {hasShared && (
+                  <span style={{ ...caption, letterSpacing: 0 }}>* shared within your organization</span>
+                )}
+              </div>
+            )
+          })()}
 
           {/* CODE: filename input + buttons */}
           {mode === 'code' && (

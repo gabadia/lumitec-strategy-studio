@@ -316,6 +316,20 @@ export default function App() {
     setLoadedStrategyName(strategyName)
   }, [setCode, setSavedCode, setLoadedStrategyName])
 
+  // Pull a published agent's source into the editor as an unsaved local copy —
+  // not linked to a local file, so Save As / Publish name it explicitly.
+  const handleOpenPublished = useCallback(async (strategyId: string) => {
+    const r = await fetch(`/api/published-strategies/${encodeURIComponent(strategyId)}`, { headers: authHeaders() })
+    if (!r.ok) throw new Error(`HTTP ${r.status}`)
+    const d = await r.json()
+    const src: string = d.code ?? ''
+    if (!src) throw new Error('no inline source for this agent')
+    setCode(src)
+    setSavedCode('')
+    setLoadedStrategyName(null)
+    setRightPanel('code')
+  }, [setCode, setSavedCode, setLoadedStrategyName])
+
   const handleRun = useCallback(async (
     intent: string,
     strategyName?: string,
@@ -643,7 +657,7 @@ export default function App() {
         )}
       </header>
 
-      <IntentInput onRun={handleRun} onLoad={handleLoad} onStop={handleStop} onResubmit={handleResubmit} isRunning={isRunning} editorCode={code} modelSettings={modelSettings} onModelSettingsChange={setModelSettings} />
+      <IntentInput onRun={handleRun} onLoad={handleLoad} onOpenPublished={handleOpenPublished} onStop={handleStop} onResubmit={handleResubmit} isRunning={isRunning} editorCode={code} modelSettings={modelSettings} onModelSettingsChange={setModelSettings} />
 
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         <div style={{ width: '45%', borderRight: '1px solid var(--border)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
