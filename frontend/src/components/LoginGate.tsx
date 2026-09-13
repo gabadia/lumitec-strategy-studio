@@ -72,7 +72,7 @@ export default function LoginGate({ children }: Props) {
             <div style={{ color: 'var(--accent)', fontWeight: 700, fontSize: 16, letterSpacing: '0.05em' }}>
               LUMITEC
             </div>
-            <div style={{ color: 'var(--text-dim)', fontSize: 12, marginTop: 2 }}>Strategy Studio</div>
+            <div style={{ color: 'var(--text-dim)', fontSize: 12, marginTop: 2 }}>Agent Studio</div>
           </div>
 
           {error && <div style={{ color: '#e5484d', fontSize: 12 }}>{error}</div>}

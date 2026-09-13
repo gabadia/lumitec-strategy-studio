@@ -605,7 +605,7 @@ export default function App() {
         flexShrink: 0,
       }}>
         <img src="/lumitecLargeLogo.jpeg" alt="Lumitec" style={{ height: 28, objectFit: 'contain' }} />
-        <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>Strategy Studio</span>
+        <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>Agent Studio</span>
         <div style={{ flex: 1 }} />
         <button
           onClick={() => setShowClearRuns(true)}
