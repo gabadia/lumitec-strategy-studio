@@ -100,7 +100,7 @@ export default function CodePanel() {
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle')
   const [publishStatus, setPublishStatus] = useState<'idle' | 'ok'>('idle')
   const [publishInfo, setPublishInfo] = useState<
-    { name: string; version?: string; revision?: number; visibility?: string } | null
+    { name: string; logicId?: string; version?: string; sha256?: string; revision?: number; visibility?: string; unchanged?: boolean } | null
   >(null)
   // Blocking failure dialog — publish is deliberate + infrequent, so a failure
   // must be acknowledged rather than flashing past as a toast.
@@ -237,9 +237,15 @@ export default function CodePanel() {
 
       setPublishInfo({
         name: typeof data?.name === 'string' ? data.name : publishName,
-        version: data?.upstream?.user_version,
+        logicId: data?.logic_id,
+        version: data?.version ?? data?.upstream?.user_version,
+        sha256: data?.sha256,
         revision: data?.upstream?.revision,
         visibility: data?.visibility ?? visibility,
+        // Registry no-ops a republish whose content exactly matches the latest
+        // revision (no new version minted) — surface that instead of implying
+        // a new version was just created.
+        unchanged: data?.upstream?.status === 'unchanged',
       })
       setPublishStatus('ok')
       setTimeout(() => setPublishStatus('idle'), 8000)
@@ -311,12 +317,19 @@ export default function CodePanel() {
         {publishStatus === 'ok' && publishInfo && (
           <span
             onClick={() => setPublishStatus('idle')}
-            title="dismiss"
-            style={{ fontSize: 10, color: 'var(--green)', fontFamily: 'var(--font-mono)', cursor: 'pointer' }}
+            title={[
+              publishInfo.logicId ? `logic_id: ${publishInfo.logicId}` : '',
+              publishInfo.sha256 ? `sha256: ${publishInfo.sha256}` : '',
+              publishInfo.unchanged ? 'code is identical to the already-published version — no new version was created' : '',
+              'click to dismiss',
+            ].filter(Boolean).join('\n')}
+            style={{ fontSize: 10, color: publishInfo.unchanged ? 'var(--text-dim)' : 'var(--green)', fontFamily: 'var(--font-mono)', cursor: 'pointer' }}
           >
-            ✓ published {publishInfo.name}
-            {publishInfo.version ? ` · v${publishInfo.version}` : ''}
-            {publishInfo.revision != null ? ` rev ${publishInfo.revision}` : ''}
+            {publishInfo.unchanged ? `↔ no changes — ${publishInfo.name}` : `✓ published ${publishInfo.name}`}
+            {publishInfo.version
+              ? ` · v${publishInfo.version}`
+              : publishInfo.revision != null ? ` · rev ${publishInfo.revision}` : ''}
+            {publishInfo.sha256 ? ` · #${publishInfo.sha256.slice(0, 8)}` : ''}
             {publishInfo.visibility ? ` · ${publishInfo.visibility}` : ''}
           </span>
         )}

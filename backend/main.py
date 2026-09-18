@@ -29,6 +29,7 @@ Run DB layout (under RUNS_DIR):
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -192,6 +193,69 @@ def _trader_dir(trader_id: str) -> Path:
 
 def _shared_dir(org_id: str) -> Path:
     return STRATEGIES_DIR / "shared" / org_id
+
+
+# ---------------------------------------------------------------------------
+# Registry-link tracking: remembers which registry logic_id a locally-named
+# strategy was last published as, so republishing under the same name updates
+# that entry (new version) instead of the registry minting a brand-new one.
+# Keyed by (trader_id, local name) — one hidden JSON file per trader.
+# ---------------------------------------------------------------------------
+
+def _registry_links_path(trader_id: str) -> Path:
+    return _trader_dir(trader_id) / ".registry_links.json"
+
+
+def _load_registry_link(trader_id: str, name: str) -> dict | None:
+    path = _registry_links_path(trader_id)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return None
+    return data.get(name) if isinstance(data, dict) else None
+
+
+def _save_registry_link(trader_id: str, name: str, *, logic_id: str, version: str | None, sha256: str | None) -> None:
+    path = _registry_links_path(trader_id)
+    try:
+        data = json.loads(path.read_text()) if path.exists() else {}
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    data[name] = {
+        "logic_id": logic_id,
+        "version": version,
+        "sha256": sha256,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2))
+
+
+def _forget_registry_link(trader_id: str, logic_id: str) -> None:
+    """Purge is permanent — drop any local name→logic_id mapping pointing at
+    it, so a later publish of that name starts a clean new registry entry
+    instead of the registry silently reusing the purged UUID (it does not
+    validate that a caller-supplied strategy_id still exists)."""
+    path = _registry_links_path(trader_id)
+    if not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            return
+    except Exception:
+        return
+    changed = False
+    for name, link in list(data.items()):
+        if isinstance(link, dict) and link.get("logic_id") == logic_id:
+            del data[name]
+            changed = True
+    if changed:
+        path.write_text(json.dumps(data, indent=2))
 
 
 async def _get_trader_id(request: Request) -> str:
@@ -999,6 +1063,26 @@ async def resubmit_strategy(body: ResubmitStrategyRequest, request: Request):
     )
 
 
+def _raise_for_upstream_error(response: httpx.Response) -> None:
+    """Forward a non-2xx strategy-server reply as a structured HTTPException
+    (unwraps the server's one-level {"detail": ...} envelope) so callers can
+    render {message, errors[]} or a plain string uniformly."""
+    try:
+        upstream_err = response.json()
+    except Exception:
+        upstream_err = {"message": response.text[:2000] or f"HTTP {response.status_code}"}
+    if isinstance(upstream_err, dict) and set(upstream_err) == {"detail"}:
+        upstream_err = upstream_err["detail"]
+    raise HTTPException(
+        status_code=response.status_code,
+        detail={
+            "source": "strategy_server",
+            "upstream_status": response.status_code,
+            "error": upstream_err,
+        },
+    )
+
+
 @app.post("/publish-strategy")
 async def publish_strategy(body: PublishStrategyRequest, request: Request):
     """Publish/register current strategy code via strategy server API."""
@@ -1010,6 +1094,15 @@ async def publish_strategy(body: PublishStrategyRequest, request: Request):
 
     publish_url = f"{STRATEGY_SERVER_URL.rstrip('/')}{STRATEGY_SERVER_PUBLISH_PATH}"
     file_name = body.name if body.name.endswith(".py") else f"{body.name}.py"
+
+    # The registry strips the code before hashing on its end — mirror that
+    # exactly, or a mismatch 422s every publish that sends a sha256.
+    sha256 = hashlib.sha256(body.code.strip().encode("utf-8")).hexdigest()
+
+    # Same local name published before? Reuse its logic_id so this publish
+    # updates that registry entry (new version) instead of creating a duplicate.
+    existing_link = _load_registry_link(trader_id, body.name)
+
     payload = {
         "code": body.code,
         "file_name": file_name,
@@ -1018,7 +1111,11 @@ async def publish_strategy(body: PublishStrategyRequest, request: Request):
         # visibility is caller-chosen. Forward as-is; the strategy server 422s an
         # unknown value and 403s a "platform" publish without platform-admins.
         "visibility": body.visibility,
+        "sha256": sha256,
+        "artifact_type": "single_python_file",
     }
+    if existing_link and existing_link.get("logic_id"):
+        payload["logic_id"] = existing_link["logic_id"]
     # strategy_server resolves identity from the Cognito claims API Gateway
     # injects for a verified bearer token, not from these X- headers — kept
     # only as a harmless local-storage-scoping hint, forwarding is what matters.
@@ -1035,28 +1132,22 @@ async def publish_strategy(body: PublishStrategyRequest, request: Request):
         raise HTTPException(status_code=502, detail=f"Failed to reach strategy server: {exc}")
 
     if response.status_code not in (200, 201):
-        # Forward the strategy server's own error structure so the UI can render
-        # it (validator errors carry {phase, message, line}); the server wraps its
-        # payload in {"detail": ...} — unwrap that one level.
-        try:
-            upstream_err = response.json()
-        except Exception:
-            upstream_err = {"message": response.text[:2000] or f"HTTP {response.status_code}"}
-        if isinstance(upstream_err, dict) and set(upstream_err) == {"detail"}:
-            upstream_err = upstream_err["detail"]
-        raise HTTPException(
-            status_code=response.status_code,
-            detail={
-                "source": "strategy_server",
-                "upstream_status": response.status_code,
-                "error": upstream_err,
-            },
-        )
+        # validator errors carry {phase, message, line}; _raise_for_upstream_error
+        # unwraps the server's one-level {"detail": ...} envelope either way.
+        _raise_for_upstream_error(response)
 
     try:
         upstream = response.json()
     except Exception:
         upstream = {"raw": response.text[:2000] if response.text else ""}
+
+    logic_id = upstream.get("logic_id") if isinstance(upstream, dict) else None
+    version = upstream.get("version") if isinstance(upstream, dict) else None
+    server_sha256 = upstream.get("sha256") if isinstance(upstream, dict) else None
+    if server_sha256 and server_sha256 != sha256:
+        print(f"[publish] sha256 mismatch: studio={sha256} registry={server_sha256} name={body.name!r}", flush=True)
+    if logic_id:
+        _save_registry_link(trader_id, body.name, logic_id=logic_id, version=version, sha256=server_sha256 or sha256)
 
     return {
         "status": "success",
@@ -1067,6 +1158,9 @@ async def publish_strategy(body: PublishStrategyRequest, request: Request):
         "source": "strategy_server",
         "org_id": org_id,
         "trader_id": trader_id,
+        "logic_id": logic_id,
+        "version": version,
+        "sha256": server_sha256 or sha256,
         "upstream": upstream,
     }
 
@@ -1117,7 +1211,16 @@ async def list_published_strategies(request: Request):
     out = []
     for row in rows:
         mine, group = _classify_published(row, my_email=my_email, my_sub=my_sub)
-        out.append({**row, "mine": mine, "group": group})
+        out.append({
+            **row,
+            # normalized identity — fall back to the legacy field names for a
+            # registry that hasn't started returning the canonical ones yet
+            "logic_id": row.get("logic_id") or row.get("strategy_id"),
+            "version": row.get("version") or row.get("user_version"),
+            "sha256": row.get("sha256") or row.get("strategy_hash"),
+            "mine": mine,
+            "group": group,
+        })
     return {"strategies": out, "count": len(out)}
 
 
@@ -1141,6 +1244,13 @@ async def get_published_strategy(sid: str, request: Request):
     code_payload = code_r.json() if code_r.status_code == 200 else {}
     return {
         "strategy_id": sid,
+        # normalized identity — fall back to legacy fields where the registry
+        # hasn't populated the canonical ones
+        "logic_id": meta.get("logic_id") or code_payload.get("logic_id") or sid,
+        "version": meta.get("version") or code_payload.get("version") or meta.get("user_version") or code_payload.get("user_version"),
+        "sha256": meta.get("sha256") or code_payload.get("sha256") or meta.get("strategy_hash") or code_payload.get("strategy_hash"),
+        "submission_method": meta.get("submission_method") or code_payload.get("submission_method"),
+        "unpublished": meta.get("unpublished", False),
         "display_name": meta.get("display_name"),
         "class_name": meta.get("class_name") or code_payload.get("class_name"),
         "visibility": meta.get("visibility"),

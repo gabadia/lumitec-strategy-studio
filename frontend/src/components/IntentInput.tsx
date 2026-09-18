@@ -102,6 +102,11 @@ interface PublishedAgent {
   revision?: number
   execution_mode?: string
   mine?: boolean
+  // normalized identity (backend fills these, falling back to the legacy
+  // fields above when the registry hasn't populated the canonical ones)
+  logic_id?: string
+  version?: string
+  sha256?: string
 }
 
 // Mirror the desk's NewStrategyDialog grouping so both pickers read the same.
@@ -109,6 +114,19 @@ function publishedGroup(r: PublishedAgent): 'My Agents' | 'Public Agents' | 'Pla
   if (r.visibility === 'platform' || r.source === 'platform') return 'Platform Agents'
   if (r.mine && r.visibility !== 'public') return 'My Agents'
   return 'Public Agents'
+}
+
+// registry `version` is "{user_version}+{revision:010d}" (e.g. "1.0.0+0000000002") —
+// render as "{version} revN", matching the desk's NewStrategyDialog picker
+// (formatVersionLabel) so a trader sees the same label in both apps, falling
+// back to the legacy field when the registry hasn't populated the canonical one.
+function shortVersion(r: PublishedAgent): string {
+  const v = r.version ?? r.user_version
+  if (!v) return ''
+  const [base, build] = v.split('+')
+  if (!build) return base
+  const rev = parseInt(build, 10)
+  return Number.isFinite(rev) ? `${base} rev${rev}` : base
 }
 
 export default function IntentInput({ onRun, onLoad, onOpenPublished, onStop, onResubmit, isRunning, editorCode, modelSettings, onModelSettingsChange }: Props) {
@@ -472,10 +490,10 @@ export default function IntentInput({ onRun, onLoad, onOpenPublished, onStop, on
                         return list.length === 0 ? null : (
                           <optgroup key={label} label={label}>
                             {list.map((p) => (
-                              <option key={p.strategy_id} value={p.strategy_id}>
+                              <option key={p.strategy_id} value={p.strategy_id} title={p.sha256 ? `sha256: ${p.sha256}` : undefined}>
                                 {(p.display_name ?? p.strategy_id)}
                                 {p.visibility === 'shared' ? ' *' : ''}
-                                {p.user_version ? `  ·  v${p.user_version}` : ''}
+                                {shortVersion(p) ? `  ·  v${shortVersion(p)}` : ''}
                               </option>
                             ))}
                           </optgroup>

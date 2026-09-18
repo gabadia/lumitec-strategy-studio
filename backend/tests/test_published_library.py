@@ -86,6 +86,32 @@ def test_list_tags_mine_and_group(monkeypatch):
     assert (by_id["c"]["mine"], by_id["c"]["group"]) == (False, "org")
     assert (by_id["d"]["mine"], by_id["d"]["group"]) == (False, "public")
     assert (by_id["e"]["mine"], by_id["e"]["group"]) == (False, "platform")
+    # no row here has logic_id/version/sha256 — normalization falls back to the
+    # legacy strategy_id (no user_version/strategy_hash present either, so None)
+    assert by_id["a"]["logic_id"] == "a"
+    assert by_id["a"]["version"] is None
+    assert by_id["a"]["sha256"] is None
+
+
+def test_list_normalizes_identity_with_legacy_fallback(monkeypatch):
+    listing = {"strategies": [
+        {"strategy_id": "legacy-1", "owner_user": ME, "visibility": "private",
+         "user_version": "1.0.0", "strategy_hash": "9f2c"},
+        {"strategy_id": "modern-1", "owner_user": ME, "visibility": "private",
+         "logic_id": "modern-1", "version": "1.0.0+0000000002", "sha256": "cafebabe",
+         "user_version": "1.0.0", "strategy_hash": "stale"},
+    ]}
+    _install(monkeypatch, {"/strategies": _Resp(200, listing)})
+
+    data = TestClient(main.app).get("/published-strategies").json()
+    by_id = {s["strategy_id"]: s for s in data["strategies"]}
+    # legacy-only row: normalized fields fall back to the old names
+    assert by_id["legacy-1"]["logic_id"] == "legacy-1"
+    assert by_id["legacy-1"]["version"] == "1.0.0"
+    assert by_id["legacy-1"]["sha256"] == "9f2c"
+    # row that already carries canonical fields: those win over the legacy ones
+    assert by_id["modern-1"]["version"] == "1.0.0+0000000002"
+    assert by_id["modern-1"]["sha256"] == "cafebabe"
 
 
 def test_list_forwards_bearer(monkeypatch):
@@ -120,6 +146,33 @@ def test_get_merges_metadata_and_source(monkeypatch):
     assert data["revision"] == 3
     assert data["strategy_hash"] == "9f2c"
     assert data["params"] == [{"name": "edge"}]
+    # no logic_id/version/sha256/submission_method on this fixture — normalized
+    # fields fall back to the legacy ones (logic_id falls all the way back to sid)
+    assert data["logic_id"] == sid
+    assert data["version"] == "1.0.0"
+    assert data["sha256"] == "9f2c"
+    assert data["submission_method"] is None
+
+
+def test_get_prefers_canonical_identity_over_legacy(monkeypatch):
+    sid = "70b905b6-16f1-4548-b183-84437e11d5a2"
+    meta = {
+        "strategy_id": sid, "display_name": "bid_ask_spread_capture",
+        "visibility": "public", "owner_user": ME, "organization": "org-1",
+        "logic_id": sid, "version": "1.0.0+0000000003", "sha256": "cafebabe",
+        "submission_method": "inline_code",
+        "user_version": "1.0.0", "revision": 3, "strategy_hash": "stale",
+    }
+    _install(monkeypatch, {f"/{sid}/code": _Resp(200, {}), f"/{sid}": _Resp(200, meta)})
+
+    data = TestClient(main.app).get(f"/published-strategies/{sid}").json()
+    assert data["logic_id"] == sid
+    assert data["version"] == "1.0.0+0000000003"
+    assert data["sha256"] == "cafebabe"
+    assert data["submission_method"] == "inline_code"
+    # legacy fields still pass through untouched
+    assert data["user_version"] == "1.0.0"
+    assert data["revision"] == 3
 
 
 def test_get_404_is_surfaced(monkeypatch):

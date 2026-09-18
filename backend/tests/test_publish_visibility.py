@@ -116,3 +116,68 @@ def test_validator_errors_are_forwarded_structured(monkeypatch):
     assert err["message"] == "Strategy validation failed"
     assert err["errors"][0]["phase"] == "security"
     assert err["errors"][0]["line"] == 586
+
+
+# --- sha256 + logic_id (immutable identity) -----------------------------------
+# The registry strips the code before hashing on its end and accepts a
+# `logic_id` in the publish body to mean "update this existing entry". These
+# tests monkeypatch STRATEGIES_DIR to a tmp_path so the .registry_links.json
+# bookkeeping file never touches the real data/ directory.
+
+def test_sha256_is_computed_from_stripped_code(monkeypatch, tmp_path):
+    import hashlib
+
+    monkeypatch.setattr(main, "STRATEGIES_DIR", tmp_path)
+    _install(monkeypatch, reply=_FakeResponse(201, {"visibility": "private"}))
+    code = "  \nclass Config: pass\n  \n"
+    resp = TestClient(main.app).post("/publish-strategy", json={"name": "probe_strat", "code": code})
+    assert resp.status_code == 200
+    expected = hashlib.sha256(code.strip().encode("utf-8")).hexdigest()
+    assert _FakeAsyncClient.captured["json"]["sha256"] == expected
+    # registry reply carried no sha256 of its own — Studio's own hash is the fallback
+    assert resp.json()["sha256"] == expected
+
+
+def test_first_publish_sends_no_logic_id(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "STRATEGIES_DIR", tmp_path)
+    _install(monkeypatch, reply=_FakeResponse(
+        201, {"visibility": "private", "logic_id": "abc-123", "version": "1.0.0+0000000001"},
+    ))
+    resp = _post()
+    assert resp.status_code == 200
+    assert "logic_id" not in _FakeAsyncClient.captured["json"]
+    data = resp.json()
+    assert data["logic_id"] == "abc-123"
+    assert data["version"] == "1.0.0+0000000001"
+
+
+def test_republish_of_same_name_reuses_logic_id(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "STRATEGIES_DIR", tmp_path)
+
+    _install(monkeypatch, reply=_FakeResponse(
+        201, {"visibility": "private", "logic_id": "abc-123", "version": "1.0.0+0000000001", "sha256": "deadbeef"},
+    ))
+    first = _post()
+    assert first.status_code == 200
+    assert "logic_id" not in _FakeAsyncClient.captured["json"]
+
+    _install(monkeypatch, reply=_FakeResponse(
+        201, {"visibility": "private", "logic_id": "abc-123", "version": "1.0.0+0000000002", "sha256": "cafebabe"},
+    ))
+    second = _post()
+    assert second.status_code == 200
+    assert _FakeAsyncClient.captured["json"]["logic_id"] == "abc-123"
+    assert second.json()["version"] == "1.0.0+0000000002"
+
+
+def test_different_name_does_not_reuse_logic_id(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "STRATEGIES_DIR", tmp_path)
+
+    _install(monkeypatch, reply=_FakeResponse(201, {"visibility": "private", "logic_id": "abc-123"}))
+    r1 = TestClient(main.app).post("/publish-strategy", json={"name": "strat_a", "code": "x = 1"})
+    assert r1.status_code == 200
+
+    _install(monkeypatch, reply=_FakeResponse(201, {"visibility": "private", "logic_id": "xyz-789"}))
+    r2 = TestClient(main.app).post("/publish-strategy", json={"name": "strat_b", "code": "y = 2"})
+    assert r2.status_code == 200
+    assert "logic_id" not in _FakeAsyncClient.captured["json"]
