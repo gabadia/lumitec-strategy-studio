@@ -129,14 +129,14 @@ cp frontend/.env.example frontend/.env.local
 | `PORT` | Backend port (default `8089`) |
 | `ORCHESTRATOR_URL` / `STRATEGY_SERVER_URL` / `STRATEGY_SERVER_PUBLISH_PATH` | Real command-plane base URLs — see `lumitec-desk-cloud/OPS_RUNBOOK.md` for the current invoke URL if it's changed |
 | `SSE_GATEWAY_URL` | Real-time event source; scheme (`ws(s)://` vs `http(s)://`) picks transport |
-| `COGNITO_USER_POOL_ID` / `COGNITO_REGION` / `COGNITO_APP_CLIENT_ID` | Cognito verification config — **`COGNITO_APP_CLIENT_ID` is blank until `terraform apply` runs**, see [Current Operational Status](#current-operational-status) |
+| `COGNITO_USER_POOL_ID` / `COGNITO_REGION` / `COGNITO_APP_CLIENT_ID` | Cognito verification config — populated, terraform applied, see [Current Operational Status](#current-operational-status) |
 | `DEMO_USER_ENTITLEMENTS` | JSON map, Cognito email → `{account_id, trader_id, supervisor_ids}`. Manually-maintained stopgap — adding a user here does NOT grant access; access is enforced by the orchestrator's entitlements table (grant via `lumitec-desk-cloud/scripts/seed_entitlement.py`) |
 
 **`frontend/.env.local`**
 | Var | Purpose |
 |---|---|
 | `VITE_COGNITO_DOMAIN` | Hosted UI domain (shared with `lumitec-desk-ui`) |
-| `VITE_COGNITO_CLIENT_ID` | Studio's own dedicated app client — **blank until `terraform apply` runs** |
+| `VITE_COGNITO_CLIENT_ID` | Studio's own dedicated app client — populated, terraform applied |
 | `VITE_COGNITO_REDIRECT_URI` / `VITE_COGNITO_LOGOUT_URI` | OAuth callback/logout URLs, default `http://localhost:5174/...` |
 
 ## Running Locally
@@ -179,21 +179,19 @@ All routes are registered **without** an `/api` prefix — the Vite dev proxy st
 
 ## Current Operational Status
 
-- **Cognito auth + real-infra submit flow: code complete, not yet live.**
-  `backend/auth.py` and `frontend/src/auth/cognito.ts` are implemented and merged
-  (commits `08bc034`, `14e432d`, `4028e38`), and `_phase_submit` in `agent.py` now
-  submits directly to the real orchestrator with real
-  `account_id`/`trader_id`/`supervisor_id`. The strategy-events SSE relay is also
-  auth-gated now and forwards the caller's token to the cloud fanout (`4028e38`).
-  However, `COGNITO_APP_CLIENT_ID` / `VITE_COGNITO_CLIENT_ID` are still blank —
-  the terraform plan that creates the Studio's dedicated Cognito app client and
-  web UI infra (`lumitec-desk-cloud/terraform/my.plan`, generated 2026-08-23) has
-  **not been applied**. Do not apply while EC2 instances are down (nightly
-  scheduler stops them outside `cron(0 9 ? * MON-THU *)`–`cron(0 17 ...)` ET) —
-  check `lumitec-desk-cloud/OPS_RUNBOOK.md`'s latest §17 SOD entry first.
-  Next steps once applied: fill in both client-ID env vars with the real
-  `module.cognito.studio_user_pool_client_id` output, then test the login flow
-  end-to-end.
+- **Cognito auth + real-infra submit flow: live.** `backend/auth.py` and
+  `frontend/src/auth/cognito.ts` are implemented and merged (commits
+  `08bc034`, `14e432d`, `4028e38`), and `_phase_submit` in `agent.py` submits
+  directly to the real orchestrator with real
+  `account_id`/`trader_id`/`supervisor_id`. The strategy-events SSE relay is
+  auth-gated and forwards the caller's token to the cloud fanout (`4028e38`).
+  The terraform plan that creates the Studio's dedicated Cognito app client
+  and web UI infra has since been applied — `COGNITO_APP_CLIENT_ID` /
+  `VITE_COGNITO_CLIENT_ID` are populated in `backend/.env` /
+  `frontend/.env.local`, and this whole 2026-09-18 session's live testing
+  (publish/unpublish/purge, etc.) went through real Cognito login. Proactive
+  ID-token refresh was added 2026-09-18 (see change log) so a long session no
+  longer 401s once the 1-hour ID token goes stale.
 - **Standalone strategy validator is gone from the pre-submit loop.** There is no
   HTTP validate endpoint reachable from Studio in the real deployment (the
   validator Lambda is IAM-restricted, only invokable from inside the
