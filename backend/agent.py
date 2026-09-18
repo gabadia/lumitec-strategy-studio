@@ -83,7 +83,11 @@ MAX_SIMULATION_POLLS    = 60  # kept for reference, no longer used in agent
 
 # ─── Local market-data lifecycle validation ─────────────────────────────────
 _QUOTE_SUB_RE = re.compile(r"subscribe_market_data\s*\([^)]*subscribe_quotes\s*=\s*True", re.IGNORECASE | re.DOTALL)
-_QUOTE_UNSUB_RE = re.compile(r"unsubscribe_market_data\s*\([^)]*subscribe_quotes\s*=\s*True", re.IGNORECASE | re.DOTALL)
+# unsubscribe_market_data()'s real keyword args are unsubscribe_quotes/unsubscribe_trades
+# (see lumitec/strategy/base.py) — NOT subscribe_quotes/subscribe_trades. Matching the
+# subscribe-side keyword here used to make this check pass for code that would actually
+# TypeError at runtime, while rejecting code that correctly called unsubscribe_quotes=True.
+_QUOTE_UNSUB_RE = re.compile(r"unsubscribe_market_data\s*\([^)]*unsubscribe_quotes\s*=\s*True", re.IGNORECASE | re.DOTALL)
 _BAR_SUB_RE = re.compile(r"subscribe_market_data_bars\s*\(", re.IGNORECASE)
 _BAR_UNSUB_RE = re.compile(r"unsubscribe_market_data_bars\s*\(", re.IGNORECASE)
 

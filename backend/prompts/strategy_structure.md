@@ -207,8 +207,8 @@ def on_stop(self) -> None:
     )
     self.unsubscribe_market_data(
         self.symbol_a,
-        subscribe_quotes=True,
-        subscribe_trades=False,
+        unsubscribe_quotes=True,
+        unsubscribe_trades=False,
     )
     self.observe("Strategy stopped")
 
@@ -233,7 +233,9 @@ self.unsubscribe_market_data_bars(symbol, BarAggregation.SECOND, step=5, price_t
 self.subscribe_market_data(symbol, subscribe_quotes=True, subscribe_trades=False)
 
 # Quote teardown (required in on_stop when quotes are used)
-self.unsubscribe_market_data(symbol, subscribe_quotes=True, subscribe_trades=False)
+# NOTE: unsubscribe_market_data's keyword args are unsubscribe_quotes/unsubscribe_trades
+# — NOT subscribe_quotes/subscribe_trades (those belong to subscribe_market_data above).
+self.unsubscribe_market_data(symbol, unsubscribe_quotes=True, unsubscribe_trades=False)
 
 # Last quote
 quote = self.last_quote(symbol)   # None if no data yet
