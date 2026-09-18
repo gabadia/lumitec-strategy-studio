@@ -1,0 +1,20 @@
+{
+  "simple_agent": {
+    "logic_id": "59600adc-2e03-4965-91e7-c5622db5398c",
+    "version": "1.0.0+0000000002",
+    "sha256": "fe3dcf6e76e1e0c8618eaf546d65bcf3e34aa1f841b00e9d27710425dbee76a2",
+    "updated_at": "2026-09-16T20:55:44.723415+00:00"
+  },
+  "simple_template": {
+    "logic_id": "19cbcc84-d345-43ae-8b44-4c24da612d7a",
+    "version": "1.0.0+0000000001",
+    "sha256": "87ef096190f9a5ea2ec695cf87fddcb19afbbde8663dc67744807af3fbaa8449",
+    "updated_at": "2026-09-18T15:10:32.760223+00:00"
+  },
+  "bid_ask_spread_capture": {
+    "logic_id": "f17f3f61-527f-4d82-ac3c-6e0fa836ffa9",
+    "version": "1.0.0+0000000001",
+    "sha256": "4d5cb8a7e36db23eff99c009842ee270be1c751fd30b601f15d1b2cb2f9ce1ce",
+    "updated_at": "2026-09-18T18:39:42.667604+00:00"
+  }
+}
