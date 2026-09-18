@@ -157,9 +157,12 @@ class ConfigParams:
 
 
 class MyStrategy(LumiteBaseStrategy):
-    mission = StrategyMission.INTRADAY_ARBITRAGE
-    objective = StrategyObjective.SIGNAL_DRIVEN
-    leg_mode = LegMode.CONTINUOUS
+    # mission/objective/leg_mode must match what the strategy actually does —
+    # see the decision tables in strategy_structure.md ("Choosing mission" / "Choosing objective").
+    # Example below is for a single-order execution strategy; do not copy it blindly.
+    mission = StrategyMission.EXECUTION
+    objective = StrategyObjective.TARGET_QTY
+    leg_mode = LegMode.FINITE
     leg_schema = [{"label": "Leg A", "side": None, "fixed_side": False}]
 
     def __init__(self, config: Config):

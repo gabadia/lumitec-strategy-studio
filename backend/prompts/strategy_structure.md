@@ -14,9 +14,9 @@ Generated strategy files must begin with a module docstring header before import
 Every strategy must extend `LumitecBaseStrategy` and declare these class attributes:
 ```python
 class MyStrategy(LumitecBaseStrategy):
-    mission    = StrategyMission.INTRADAY_ARBITRAGE   # WHY it trades
-    objective  = StrategyObjective.SIGNAL_DRIVEN      # WHEN it is done
-    leg_mode   = LegMode.CONTINUOUS                   # FINITE | CONTINUOUS | CONDITIONAL
+    mission    = StrategyMission.EXECUTION   # WHY it trades
+    objective  = StrategyObjective.TARGET_QTY   # WHEN it is done
+    leg_mode   = LegMode.FINITE               # FINITE | CONTINUOUS | CONDITIONAL
 
     # Declares expected legs to the UI — drives auto-population and side locking
     leg_schema = [{"label": "Leg A", "side": None, "fixed_side": False}]
@@ -38,12 +38,30 @@ Available `LegMode` values:
 | `LegMode.CONTINUOUS` | Ongoing execution — strategy keeps running across multiple cycles (e.g. `claude_pairs_strategy.py`) |
 | `LegMode.CONDITIONAL` | Conditional execution — strategy activates only when a condition is met |
 
-Available missions: `EXECUTION`, `MARKET_MAKING`, `INTRADAY_ARBITRAGE`,
-`CROSS_MARKET_ARBITRAGE`, `INVENTORY_MANAGEMENT`, `SPECULATIVE`
+**Choosing `mission`** — labels *why* the strategy trades. Purely descriptive, does not affect completion:
 
-Available objectives: `UNKNOWN`, `TARGET_QTY`, `TARGET_VALUE`, `TARGET_PARTICIPATION`,
-`VWAP`, `TWAP`, `SIGNAL_DRIVEN`, `INVENTORY_TARGET`, `INTRADAY_ARBITRAGE`,
-`CROSS_MARKET_ARBITRAGE`
+| Value | Use when |
+|-------|----------|
+| `EXECUTION` | Working a single parent order (or a small fixed set of orders) to a target — the common case for a straightforward "submit and fill" strategy |
+| `MARKET_MAKING` | Continuously quoting both sides to capture spread |
+| `INTRADAY_ARBITRAGE` | Exploiting a mispricing between two related instruments in one session |
+| `CROSS_MARKET_ARBITRAGE` | Exploiting a mispricing between two different venues/markets |
+| `INVENTORY_MANAGEMENT` | Managing/rebalancing an existing position rather than opening a new one |
+| `SPECULATIVE` | Directional bet with no execution target — closest fit is usually still `EXECUTION` or `SIGNAL_DRIVEN`'s objective below; rarely the right pick |
+
+**Choosing `objective`** — determines *when the strategy is done*, and critically, **whether the supervisor's aggregator can auto-detect completion or the strategy must call `forced_stop()` itself**:
+
+| Value | Use when | Auto-completed by supervisor? |
+|-------|----------|------|
+| `TARGET_QTY` | Fill a specific quantity, then stop (e.g. "buy 100 shares") — the default choice for a single-order/template strategy | Yes — aggregator detects the fill and completes it |
+| `TARGET_VALUE` | Fill up to a target notional value, then stop | Yes |
+| `INVENTORY_TARGET` | Move current inventory to a target level, then stop | Yes |
+| `VWAP` / `TWAP` | Execute a parent order against a volume/time-weighted schedule | Yes |
+| `INTRADAY_ARBITRAGE` / `CROSS_MARKET_ARBITRAGE` | Matches the arbitrage missions above | Yes |
+| `SIGNAL_DRIVEN` | Runs indefinitely reacting to signals, with no fixed fill target (e.g. a market maker or a continuous pairs strategy) | **No — the strategy itself must call `self.forced_stop(reason, "MANUAL")` when it decides it is done; otherwise it never emits a terminal event and the UI hangs forever** |
+| `UNKNOWN` | Never use — placeholder only |
+
+If a strategy's job is "submit one order for a target quantity and stop," use `TARGET_QTY`, not `SIGNAL_DRIVEN` — `SIGNAL_DRIVEN` is only for strategies that genuinely run indefinitely on signals and explicitly stop themselves.
 
 ---
 
@@ -410,13 +428,13 @@ Never override `pause()` or `resume()` directly — those are base class methods
 
 ## Graceful stop
 
-`forced_stop(reason, stop_reason)` is the only correct way to stop a strategy from within. It emits a `FORCED_STOP` lifecycle event (consumed by the aggregator and SSE gateway), then calls Nautilus `stop()`.
+`forced_stop(reason, stop_reason)` is the **only** correct way to stop a strategy from within. Plain `self.stop()` skips the `FORCED_STOP` lifecycle event that the aggregator and SSE gateway rely on — if you call it, the platform never learns the strategy finished and the UI hangs forever waiting for a terminal event. **Never call plain `self.stop()`.**
 
-`stop_reason` must be one of: `"TIME"` | `"RISK"` | `"SYSTEM"`
+`stop_reason` must be one of: `"MANUAL"` | `"TIME"` | `"RISK"` | `"SYSTEM"`
 
 ```python
-# Strategy completed its objective (target filled, positions neutralised, etc.) — use plain stop()
-self.stop()
+# Strategy completed its objective normally (target filled, positions neutralised, etc.) — use forced_stop() with "MANUAL"
+self.forced_stop("Target quantity filled", "MANUAL")
 
 # Risk limit hit (max loss, max gain, stop-loss, drawdown, etc.) — use forced_stop()
 self.forced_stop("Max loss reached", "RISK")
@@ -425,9 +443,8 @@ self.forced_stop("Max loss reached", "RISK")
 self.forced_stop("End time reached", "TIME")
 ```
 
-> **`manual_stop()` no longer exists.**
-> Use `self.stop()` when the strategy fulfils its own objective.
-> Use `self.forced_stop(reason, stop_reason)` for all other terminations (risk, time, system).
+> **`manual_stop()` and plain `self.stop()` are not valid ways to end a strategy.**
+> Always call `self.forced_stop(reason, stop_reason)` — use `stop_reason="MANUAL"` when the strategy fulfils its own objective, and `"TIME"` / `"RISK"` / `"SYSTEM"` for the other termination cases.
 
 ---
 
@@ -603,9 +620,9 @@ class ConfigParams:
 
 
 class MyStrategy(LumitecBaseStrategy):
-    mission = StrategyMission.INTRADAY_ARBITRAGE
-    objective = StrategyObjective.SIGNAL_DRIVEN
-    leg_mode = LegMode.CONTINUOUS
+    mission = StrategyMission.EXECUTION
+    objective = StrategyObjective.TARGET_QTY
+    leg_mode = LegMode.FINITE
     leg_schema = [{"label": "Leg A", "side": None, "fixed_side": False}]
 
     def __init__(self, config: Config):
