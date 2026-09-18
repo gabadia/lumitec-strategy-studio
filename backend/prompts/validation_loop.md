@@ -56,7 +56,7 @@ All 16 patterns must be present. If the error references one of these, add the m
 
 | # | Pattern | Minimal Fix |
 |---|---|---|
-| 0 | `Config` class inheriting `LumitecStrategyConfig` | Add `class Config(LumitecStrategyConfig): strategy_name: str = "MyStrategy"; file_name: str = "my_strategy.py"` |
+| 0 | `Config` class inheriting `LumitecStrategyConfig` | Add `class Config(LumitecStrategyConfig): strategy_name: str = "MyStrategy"; file_name: str = "my_strategy.py"` **at module (top) level, unindented — never nested inside the strategy class or any other class** |
 | 1 | `@dataclass(frozen=True)` on ConfigParams | Add decorator |
 | 2 | `validate()` in ConfigParams | Add method that raises `ValueError` on bad params |
 | 3 | `merged()` in ConfigParams | Add method returning `replace(self, **coerced)` |

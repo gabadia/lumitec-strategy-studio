@@ -1281,7 +1281,13 @@ async def _phase_submit(
                 )
                 fixed = _clean_openai_code(fixed_text)
                 if fixed:
-                    code = fixed
+                    # The fix loop's patch can itself re-nest Config/ConfigParams
+                    # (e.g. adding a missing Config class indented inside the
+                    # strategy class) — _unnest_config_classes only ran once,
+                    # before this loop started, so without re-running it here a
+                    # newly-nested class goes uncaught and every remaining
+                    # attempt resubmits the same still-broken code.
+                    code = _unnest_config_classes(fixed)
                     yield {
                         "type": "tool_call",
                         "id": f"fix_{attempt}",
