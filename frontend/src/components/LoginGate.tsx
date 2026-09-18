@@ -21,11 +21,18 @@ const centerStyle: React.CSSProperties = {
  *  - otherwise hydrates from any existing session in sessionStorage
  * Renders children only once authenticated; otherwise a login screen.
  */
+// The Cognito ID token is valid for 1 hour; the refresh token for 30 days.
+// Proactively refresh well within that window so a session outlives a long
+// work session instead of silently 401ing every request once the ID token
+// goes stale.
+const REFRESH_INTERVAL_MS = 4 * 60 * 1000
+
 export default function LoginGate({ children }: Props) {
   const status = useSessionStore((s) => s.status)
   const login = useSessionStore((s) => s.login)
   const hydrate = useSessionStore((s) => s.hydrate)
   const completeLoginWithCode = useSessionStore((s) => s.completeLoginWithCode)
+  const refreshIfNeeded = useSessionStore((s) => s.refreshIfNeeded)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -43,6 +50,21 @@ export default function LoginGate({ children }: Props) {
     }
     hydrate()
   }, [])
+
+  useEffect(() => {
+    if (status !== 'authenticated') return
+    // Also check right when a backgrounded/sleeping tab comes back — a long
+    // sleep can outlast the interval entirely and leave a stale token behind.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void refreshIfNeeded()
+    }
+    const id = setInterval(() => { void refreshIfNeeded() }, REFRESH_INTERVAL_MS)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      clearInterval(id)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [status, refreshIfNeeded])
 
   if (status === 'checking') {
     return (
