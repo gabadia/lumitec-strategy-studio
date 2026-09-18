@@ -10,6 +10,7 @@
 
 | Date | Changes |
 |------|---------|
+| 2026-09-18 | **External fix (applied, pushed — not yet live-verified): event-broadcast ordering bug, `order-strategy-system`.** The handoff brief from the diagnosis below was implemented as written: `ingest_event()` in `supervisor/core/event_router.py` now sends the raw mapped `ui_event` to `_SSE_QUEUE` immediately after `ui_event["seq"]`/`ui_event["strategy_id"]` are set — before the `should_bypass` check and before the leg/strategy aggregation pipeline — instead of only via the old unconditional fallback at the end of the function. The `should_bypass` branch's own send and the tail fallback send were both removed so no event type is enqueued twice. `order.fill` (and any other raw event whose aggregation cascade completes a strategy) is now queued ahead of `leg.partial`/`strategy.completed`/etc. derived from it, matching `seq` order. Committed `970236c` on branch `nt-upgrade/1.231.0` in `order-strategy-system`, pushed to origin. **Still open:** live Kafka verification (consume `lumitec.oms.events`, check `ts_ingested` order on a single-fill-completes-strategy run) and a multi-fill/partial-fill regression check have not been run yet — see Known Open Issues. |
 | 2026-09-18 | **External diagnosis (not fixed here): event-broadcast ordering bug in `order-strategy-system`.** A template strategy whose single order fills and completes it in one pass never showed an `order.fill` event in the browser feed — jumped straight from `order.accepted` to `leg.partial`. Confirmed via a raw Kafka consume (see "Kafka event pipeline" under Known Open Issues) that the event *does* reach `lumitec.oms.events`, but lands after `strategy.completed`. Root cause is deterministic, not a race: `supervisor/core/event_router.py`'s `ingest_event()` runs the aggregation pipeline (which sends `leg.partial`/`strategy.completed`, derived from the raw event) *before* reaching the unconditional fallback that sends the raw event itself — so any raw event whose aggregation cascade includes a strategy completion is always broadcast after its own effects. A precise handoff brief (exact fix: move the raw-event send to right after `ui_event["seq"] = next(_UI_SEQ)`, before aggregation) was written for an `order-strategy-system` session — **not yet applied**. See Known Open Issues. |
 | 2026-09-18 | **External fix (deployed): registry publish-idempotency + purge Decimal-format bug, `lumitec-desk-cloud`.** Republishing byte-identical code was minting a new registry revision (+ S3 objects) every time; `publish_strategy()` in `lambdas/strategy_server/lambda_function.py` now compares the incoming publish against the `LATEST` item's content (code hash, params, leg_schema, mission/objective/leg_mode, submission_method) and returns `{"status": "unchanged"}` instead of writing when nothing changed (`force: true` bypasses the check). The same deploy also carried the `_s3_key()` `Decimal`/`:010d` formatting fix for `purge_strategy()` that had been diagnosed earlier (crashed after deleting the `LATEST` DynamoDB row but before touching `VERSION` rows or S3 — see `simple_agent`'s leftover state under Known Open Issues). Confirmed live: Lambda `lumitec-demo-strategy-server` redeployed 2026-09-18T14:50:33Z (new `CodeSha256`, new runtime init). No code changed in this repo. |
 | 2026-09-18 | **External TODO (handoff written, not implemented): `lumitec-desk-ui` doesn't surface `logic_id`/`version`.** `src/wiring/api/strategyServer.ts`'s `StrategySummary`/`GetCodeResponse` drop the registry's identity fields entirely. Handoff brief written (add the four identity fields to both types + populate from the registry response; show a version badge in `NewStrategyDialog.tsx`'s picker around line 314; deliberately do **not** thread identity into `mapDraftToOrchestrator.ts`/`orchestrator.ts`'s submit payload — mirrors the same decision made in this repo, see below). Not yet applied. |
@@ -234,20 +235,20 @@ All routes are registered **without** an `/api` prefix — the Vite dev proxy st
   kill and restart the process (`lsof -ti tcp:8089 | xargs kill -9`) rather than
   waiting it out. Also seems to kill the frontend dev process — restart both
   together.
-- **`order.fill` (and any raw order/strategy event whose aggregation cascade
-  completes the strategy) can arrive after `strategy.completed` — deterministic
-  ordering bug in `order-strategy-system`, not fixed here.** `ingest_event()`
-  in `supervisor/core/event_router.py` sends the aggregation-derived events
-  (`leg.partial`, `strategy.completed`, …) *before* the unconditional fallback
-  that sends the raw triggering event itself, so the raw event's own effects
-  always reach the wire first. Studio's `/events` relay (`main.py`,
-  `api_strategy_events`) closes the stream on the first terminal event, so it
-  never sees the straggler. **Fix belongs in `order-strategy-system`** (move
-  the raw-event send to immediately after `ui_event["seq"] = next(_UI_SEQ)`,
-  before aggregation) — a precise handoff brief was written 2026-09-18, not
-  yet applied. No Studio-side change needed once that lands (Studio's
-  close-on-terminal behavior becomes correct once ordering is guaranteed at
-  the source).
+- **`order.fill`-before-`strategy.completed` ordering bug — fixed in
+  `order-strategy-system` (`970236c`, branch `nt-upgrade/1.231.0`, pushed),
+  not yet live-verified.** `ingest_event()` in `supervisor/core/event_router.py`
+  used to send aggregation-derived events (`leg.partial`, `strategy.completed`,
+  …) *before* the unconditional fallback that sent the raw triggering event,
+  so the raw event's own effects always reached the wire first. The raw-event
+  send now happens immediately after `ui_event["seq"] = next(_UI_SEQ)`, before
+  aggregation — see the 2026-09-18 change log entry above for the exact diff.
+  **Remaining:** a live Kafka verification (single-fill-completes-strategy run,
+  confirm `order.fill` precedes `leg.partial`/`strategy.completed` in
+  `lumitec.oms.events` by `ts_ingested`) and a multi-fill/partial-fill
+  regression check haven't been run yet. No Studio-side change needed — once
+  verified, Studio's close-on-terminal `/events` relay behavior (`main.py`,
+  `api_strategy_events`) is correct by construction.
 - **`simple_agent` registry entry is stuck half-purged.** An earlier purge
   attempt hit the (now-fixed) Decimal-format bug: it deleted the `LATEST`
   DynamoDB item but crashed before touching the `VERSION#*` rows or their S3
