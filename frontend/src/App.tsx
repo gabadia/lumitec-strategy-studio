@@ -26,7 +26,7 @@ export interface ModelSettings {
 }
 
 const DEFAULT_MODEL_SETTINGS: ModelSettings = {
-  generateModel: 'claude-sonnet-4-6',
+  generateModel: 'claude-sonnet-5',
   validateModel: 'gpt-4o-mini',
   monitorModel:  'gpt-4o-mini',
   validationProfile: 'prod',

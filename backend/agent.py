@@ -53,17 +53,17 @@ STRATEGY_REASONING_PROMPT_PATH   = os.getenv("STRATEGY_REASONING_PROMPT_PATH",  
 SIMULATION_MONITOR_PROMPT_PATH   = os.getenv("SIMULATION_MONITOR_PROMPT_PATH",   os.path.join(_PROMPTS_DIR, "simulation_monitor.md"))
 
 # ─── Models ──────────────────────────────────────────────────────────────────
-CLAUDE_MODEL       = "claude-sonnet-4-6"
+CLAUDE_MODEL       = "claude-sonnet-5"
 OPENAI_FAST_MODEL  = "gpt-4o-mini"
 OPENAI_SMART_MODEL = "gpt-4o"
 
-DEFAULT_GENERATE_MODEL = "claude-sonnet-4-6"
+DEFAULT_GENERATE_MODEL = "claude-sonnet-5"
 DEFAULT_VALIDATE_MODEL = "gpt-4o-mini"
 DEFAULT_MONITOR_MODEL  = "gpt-4o-mini"
 
 AVAILABLE_MODELS = [
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
+    "claude-opus-5",
+    "claude-sonnet-5",
     "claude-haiku-4-5-20251001",
     "gpt-4o",
     "gpt-4o-mini",

@@ -7,8 +7,8 @@ import type { ModelSettings } from '../App'
 interface StrategyEntry { name: string; source: 'private' | 'shared' }
 
 const AVAILABLE_MODELS = [
-  { value: 'claude-opus-4-6',          label: 'Claude Opus 4.6' },
-  { value: 'claude-sonnet-4-6',        label: 'Claude Sonnet 4.6' },
+  { value: 'claude-opus-5',            label: 'Claude Opus 5' },
+  { value: 'claude-sonnet-5',          label: 'Claude Sonnet 5' },
   { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' },
   { value: 'gpt-4o',                   label: 'GPT-4o' },
   { value: 'gpt-4o-mini',              label: 'GPT-4o-mini' },
