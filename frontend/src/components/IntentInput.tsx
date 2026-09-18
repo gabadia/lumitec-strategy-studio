@@ -3,6 +3,7 @@ import type React from 'react'
 import { authHeaders } from '../auth/cognito'
 import { useStore } from '../App'
 import type { ModelSettings } from '../App'
+import { ConfirmDialog, AlertDialog } from './Dialogs'
 
 interface StrategyEntry { name: string; source: 'private' | 'shared' }
 
@@ -107,10 +108,17 @@ interface PublishedAgent {
   logic_id?: string
   version?: string
   sha256?: string
+  // owner-only visible: hidden from everyone else, reversible by republishing
+  unpublished?: boolean
 }
 
-// Mirror the desk's NewStrategyDialog grouping so both pickers read the same.
-function publishedGroup(r: PublishedAgent): 'My Agents' | 'Public Agents' | 'Platform Agents' {
+type PublishedGroup = 'Unpublished (mine)' | 'My Agents' | 'Public Agents' | 'Platform Agents'
+
+// Mirror the desk's NewStrategyDialog grouping so both pickers read the same,
+// with one Studio-only addition: unpublished-but-owned agents get their own
+// group instead of blending into "My Agents".
+function publishedGroup(r: PublishedAgent): PublishedGroup {
+  if (r.mine && r.unpublished) return 'Unpublished (mine)'
   if (r.visibility === 'platform' || r.source === 'platform') return 'Platform Agents'
   if (r.mine && r.visibility !== 'public') return 'My Agents'
   return 'Public Agents'
@@ -129,6 +137,20 @@ function shortVersion(r: PublishedAgent): string {
   return Number.isFinite(rev) ? `${base} rev${rev}` : base
 }
 
+// Studio wraps a non-2xx registry reply as { detail: { error } } (error is
+// either a plain string or { message, errors: [...] } — same shape publish
+// already parses). `overrides` supplies status-specific copy (e.g. purge's
+// 409/422) ahead of the generic 403/404/fallback handling.
+function describeRegistryError(status: number, data: any, overrides: Record<number, string> = {}): string {
+  if (overrides[status]) return overrides[status]
+  if (status === 403) return "You don't own this strategy."
+  if (status === 404) return 'This strategy no longer exists in the registry.'
+  const err = data?.detail?.error ?? data?.detail ?? data
+  if (typeof err === 'string') return err
+  if (err && typeof err === 'object' && typeof err.message === 'string') return err.message
+  return `Request failed (HTTP ${status}).`
+}
+
 export default function IntentInput({ onRun, onLoad, onOpenPublished, onStop, onResubmit, isRunning, editorCode, modelSettings, onModelSettingsChange }: Props) {
   const [intent, setIntent] = useState('')
   const [mode, setMode] = useState<Mode>('prompt')
@@ -137,6 +159,9 @@ export default function IntentInput({ onRun, onLoad, onOpenPublished, onStop, on
   const [published, setPublished] = useState<PublishedAgent[]>([])
   const [pubSelected, setPubSelected] = useState<string>('')
   const [pubBusy, setPubBusy] = useState(false)
+  const [pubActionBusy, setPubActionBusy] = useState(false)
+  const [pubActionAlert, setPubActionAlert] = useState<{ title: string; message: string } | null>(null)
+  const [showPurgeConfirm, setShowPurgeConfirm] = useState(false)
   const [codeName, setCodeName] = useState<string>('')
   const [busy, setBusy] = useState(false)
   const [showModels, setShowModels] = useState(false)
@@ -254,9 +279,66 @@ export default function IntentInput({ onRun, onLoad, onOpenPublished, onStop, on
       setShowFeedback(true)
     } finally {
       setPubBusy(false)
-      setPubSelected('')
+      // Deliberately leave pubSelected set (not reset to '') — Unpublish /
+      // Delete permanently act on whichever entry is currently selected, so
+      // clearing it here would hide those actions right after opening a copy.
     }
   }, [isRunning, pubBusy, onOpenPublished])
+
+  const selectedPublished = published.find((p) => p.strategy_id === pubSelected)
+
+  const handleUnpublish = useCallback(async () => {
+    if (!selectedPublished || pubActionBusy) return
+    setPubActionBusy(true)
+    try {
+      const r = await fetch(`/api/published-strategies/${encodeURIComponent(selectedPublished.strategy_id)}`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      })
+      const data = await r.json().catch(() => null)
+      if (!r.ok) {
+        setPubActionAlert({ title: 'Unpublish failed', message: describeRegistryError(r.status, data) })
+        return
+      }
+      const sid = selectedPublished.strategy_id
+      setPublished((prev) => prev.map((p) => (p.strategy_id === sid ? { ...p, unpublished: true } : p)))
+    } catch {
+      setPubActionAlert({ title: 'Unpublish failed', message: 'Could not reach the Studio backend.' })
+    } finally {
+      setPubActionBusy(false)
+    }
+  }, [selectedPublished, pubActionBusy])
+
+  const handlePurge = useCallback(async () => {
+    if (!selectedPublished || pubActionBusy) return
+    setShowPurgeConfirm(false)
+    setPubActionBusy(true)
+    try {
+      const sid = selectedPublished.strategy_id
+      const r = await fetch(`/api/published-strategies/${encodeURIComponent(sid)}/purge`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ confirm: true }),
+      })
+      const data = await r.json().catch(() => null)
+      if (!r.ok) {
+        setPubActionAlert({
+          title: 'Delete failed',
+          message: describeRegistryError(r.status, data, {
+            409: 'This strategy must be unpublished before it can be permanently deleted.',
+            422: 'The delete confirmation was missing or invalid — try again.',
+          }),
+        })
+        return
+      }
+      setPublished((prev) => prev.filter((p) => p.strategy_id !== sid))
+      setPubSelected('')
+    } catch {
+      setPubActionAlert({ title: 'Delete failed', message: 'Could not reach the Studio backend.' })
+    } finally {
+      setPubActionBusy(false)
+    }
+  }, [selectedPublished, pubActionBusy])
 
   const handleLoad = useCallback(async () => {
     if (!selected || isRunning || busy) return
@@ -483,7 +565,7 @@ export default function IntentInput({ onRun, onLoad, onOpenPublished, onStop, on
                       style={{ ...selStyle, color: pubSelected ? 'var(--text)' : 'var(--text-dim)' }}
                     >
                       <option value="">{pubBusy ? 'Opening…' : '— open a copy —'}</option>
-                      {(['My Agents', 'Public Agents', 'Platform Agents'] as const).map((label) => {
+                      {(['Unpublished (mine)', 'My Agents', 'Public Agents', 'Platform Agents'] as const).map((label) => {
                         const list = published.filter(
                           (p) => publishedGroup(p) === label && p.execution_mode !== 'package_path',
                         )
@@ -492,6 +574,7 @@ export default function IntentInput({ onRun, onLoad, onOpenPublished, onStop, on
                             {list.map((p) => (
                               <option key={p.strategy_id} value={p.strategy_id} title={p.sha256 ? `sha256: ${p.sha256}` : undefined}>
                                 {(p.display_name ?? p.strategy_id)}
+                                {p.unpublished ? ' (unpublished)' : ''}
                                 {p.visibility === 'shared' ? ' *' : ''}
                                 {shortVersion(p) ? `  ·  v${shortVersion(p)}` : ''}
                               </option>
@@ -501,6 +584,38 @@ export default function IntentInput({ onRun, onLoad, onOpenPublished, onStop, on
                       })}
                     </select>
                   </div>
+
+                  {selectedPublished?.mine && (
+                    selectedPublished.unpublished ? (
+                      <button
+                        onClick={() => setShowPurgeConfirm(true)}
+                        disabled={pubActionBusy}
+                        title="Permanently erase this strategy — cannot be undone"
+                        style={{
+                          padding: '5px 10px', borderRadius: 4, fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: 600,
+                          background: 'var(--surface-2)', border: '1px solid var(--red)',
+                          color: pubActionBusy ? 'var(--text-muted)' : 'var(--red)',
+                          cursor: pubActionBusy ? 'default' : 'pointer',
+                        }}
+                      >
+                        Delete permanently…
+                      </button>
+                    ) : (
+                      <button
+                        onClick={handleUnpublish}
+                        disabled={pubActionBusy}
+                        title="Hide this strategy from everyone but you — reversible by publishing it again"
+                        style={{
+                          padding: '5px 10px', borderRadius: 4, fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: 600,
+                          background: 'var(--surface-2)', border: '1px solid var(--border)',
+                          color: pubActionBusy ? 'var(--text-muted)' : 'var(--text-dim)',
+                          cursor: pubActionBusy ? 'default' : 'pointer',
+                        }}
+                      >
+                        {pubActionBusy ? 'Unpublishing…' : 'Unpublish'}
+                      </button>
+                    )
+                  )}
 
                   {isRunning ? (
                     <StopButton onClick={onStop} />
@@ -514,6 +629,20 @@ export default function IntentInput({ onRun, onLoad, onOpenPublished, onStop, on
                 </div>
                 {hasShared && (
                   <span style={{ ...caption, letterSpacing: 0 }}>* shared within your organization</span>
+                )}
+                {showPurgeConfirm && selectedPublished && (
+                  <ConfirmDialog
+                    message={`Permanently delete "${selectedPublished.display_name ?? selectedPublished.strategy_id}"? This erases every version and cannot be undone.`}
+                    onYes={handlePurge}
+                    onNo={() => setShowPurgeConfirm(false)}
+                  />
+                )}
+                {pubActionAlert && (
+                  <AlertDialog
+                    title={pubActionAlert.title}
+                    message={pubActionAlert.message}
+                    onOk={() => setPubActionAlert(null)}
+                  />
                 )}
               </div>
             )

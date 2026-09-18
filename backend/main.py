@@ -1271,6 +1271,59 @@ async def get_published_strategy(sid: str, request: Request):
     }
 
 
+@app.delete("/published-strategies/{sid}")
+async def unpublish_strategy(sid: str, request: Request):
+    """Owner-only: hide a strategy from everyone but its owner, regardless of
+    visibility. Reversible — publishing it again (same logic_id) un-hides it.
+    Studio doesn't track unpublished state locally; the registry is the
+    source of truth."""
+    _check_id(sid, "strategy_id")
+    await resolve_claims(request)
+    url = f"{STRATEGY_SERVER_URL.rstrip('/')}/{sid}"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.delete(url, headers=_auth_headers(request))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to reach strategy server: {exc}")
+    if response.status_code != 200:
+        _raise_for_upstream_error(response)
+    try:
+        return response.json()
+    except Exception:
+        return {"raw": response.text[:2000] if response.text else ""}
+
+
+class PurgeStrategyRequest(BaseModel):
+    confirm: bool  # required — Studio's own gate, not only the registry's
+
+
+@app.delete("/published-strategies/{sid}/purge")
+async def purge_strategy(sid: str, body: PurgeStrategyRequest, request: Request):
+    """Owner-only, PERMANENT — erases all registry records and artifacts for
+    the strategy. Only allowed once it's already unpublished (the registry
+    enforces that two-step gate; the Studio UI's own confirmation dialog is
+    the other one — this endpoint is not the only line of defense).
+    httpx's .delete() has no body parameter, so this uses .request() instead.
+    """
+    _check_id(sid, "strategy_id")
+    trader_id = await _get_trader_id(request)  # already resolves claims — don't do it twice
+    url = f"{STRATEGY_SERVER_URL.rstrip('/')}/{sid}/purge"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.request(
+                "DELETE", url, json={"confirm": body.confirm}, headers=_auth_headers(request),
+            )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to reach strategy server: {exc}")
+    if response.status_code != 200:
+        _raise_for_upstream_error(response)
+    _forget_registry_link(trader_id, sid)
+    try:
+        return response.json()
+    except Exception:
+        return {"raw": response.text[:2000] if response.text else ""}
+
+
 @app.post("/run-strategy")
 async def run_strategy(request: RunStrategyRequest):
     """
