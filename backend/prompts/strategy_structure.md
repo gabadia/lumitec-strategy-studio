@@ -213,7 +213,7 @@ Called by the supervisor controller before instantiation. Raise `ValueError` wit
 - If `leg_schema` has `"side": None, "fixed_side": False` → `validate_legs` must NOT check the side value
 - Never declare a fixed side in `leg_schema` and then require user-selectable in `validate_legs`, or vice versa
 
-### on_stop, on_order_rejected, on_order_canceled — must be present
+### on_stop, on_order_rejected, on_order_canceled, on_order_cancel_rejected — must be present
 ```python
 def on_stop(self) -> None:
     # teardown must mirror setup exactly
@@ -235,6 +235,10 @@ def on_order_rejected(self, event) -> None:
 
 def on_order_canceled(self, event) -> None:
     self.observe(f"Order canceled: {event.client_order_id.value}")
+
+def on_order_cancel_rejected(self, event) -> None:
+    # Cancel did NOT take effect: the order may still be working (or already filled).
+    self.observe(f"Cancel rejected: {event.client_order_id.value}", context={"reason": str(event.reason)})
 ```
 
 ---
@@ -392,6 +396,9 @@ self.cancelAllOrders()              # cancel everything
 self.cancelOrdersForSymbol(symbol)  # cancel for one symbol
 ```
 
+- Never treat an order as gone when you send a cancel. Clear a tracked order ID (e.g. a quote slot) only in `on_order_canceled` or `on_order_filled` for that same ID. In `on_order_cancel_rejected`, keep tracking it.
+- In `on_order_filled`, take the side from `event.order_side`, never from comparing the order ID with the strategy's current order IDs.
+
 ---
 
 ## Pause / Resume
@@ -506,7 +513,7 @@ self.decide("Regime changed", context={"regime": new_regime})
 
 ## Validation checklist
 
-Before publishing, all 19 of these must be present in your file:
+Before publishing, all 20 of these must be present in your file:
 
 | # | Pattern |
 |---|------|
@@ -519,16 +526,17 @@ Before publishing, all 19 of these must be present in your file:
 | 7 | `on_stop()` |
 | 8 | `on_order_rejected()` |
 | 9 | `on_order_canceled()` |
-| 10 | `set_oms_type()` |
-| 11 | Rebuild signal data in `apply_params()` when thresholds change |
-| 12 | Guard `on_order_filled` for unknown `leg_id` |
-| 13 | `leg_schema` class attribute declaring expected legs |
-| 14 | `validate_legs()` classmethod enforcing leg count and side |
-| 15 | `isPaused()` guard at top of every market data handler |
-| 16 | `on_pause()` / `on_resume()` hooks (not `pause()`/`resume()`) |
-| 17 | `self.params` initialised in `__init__` |
-| 18 | `tick_throttle_interval` in `ConfigParams`; `self._last_tick_ts = 0.0` in `__init__`; timestamp throttle guard in every tick handler that calls observe/decide/act |
-| 19 | Symmetric market-data lifecycle: if quotes/bars are subscribed in `on_start`, matching quote/bar unsubscriptions must appear in `on_stop` |
+| 10 | `on_order_cancel_rejected()` |
+| 11 | `set_oms_type()` |
+| 12 | Rebuild signal data in `apply_params()` when thresholds change |
+| 13 | Guard `on_order_filled` for unknown `leg_id` |
+| 14 | `leg_schema` class attribute declaring expected legs |
+| 15 | `validate_legs()` classmethod enforcing leg count and side |
+| 16 | `isPaused()` guard at top of every market data handler |
+| 17 | `on_pause()` / `on_resume()` hooks (not `pause()`/`resume()`) |
+| 18 | `self.params` initialised in `__init__` |
+| 19 | `tick_throttle_interval` in `ConfigParams`; `self._last_tick_ts = 0.0` in `__init__`; timestamp throttle guard in every tick handler that calls observe/decide/act |
+| 20 | Symmetric market-data lifecycle: if quotes/bars are subscribed in `on_start`, matching quote/bar unsubscriptions must appear in `on_stop` |
 
 Forbidden imports (publish will be rejected if found):
 `subprocess`, `socket`, `requests`, `os.system`, `urllib`
@@ -646,6 +654,10 @@ class MyStrategy(LumitecBaseStrategy):
 
     def on_order_canceled(self, event) -> None:
         self.observe(f"Order canceled: {event.client_order_id.value}")
+
+    def on_order_cancel_rejected(self, event) -> None:
+        # Cancel did NOT take effect: the order may still be working (or already filled).
+        self.observe(f"Cancel rejected: {event.client_order_id.value}", context={"reason": str(event.reason)})
 
     def apply_params(self, updates: dict) -> None:
         with self._param_lock:

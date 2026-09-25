@@ -156,7 +156,7 @@ class ConfigParams:
         return new
 
 
-class MyStrategy(LumiteBaseStrategy):
+class MyStrategy(LumitecBaseStrategy):
     # mission/objective/leg_mode must match what the strategy actually does —
     # see the decision tables in strategy_structure.md ("Choosing mission" / "Choosing objective").
     # Example below is for a single-order execution strategy; do not copy it blindly.
@@ -187,6 +187,10 @@ class MyStrategy(LumiteBaseStrategy):
 
     def on_order_canceled(self, event) -> None:
         self.observe(f"Order canceled: {event.client_order_id.value}")
+
+    def on_order_cancel_rejected(self, event) -> None:
+        # Cancel did NOT take effect: the order may still be working (or already filled).
+        self.observe(f"Cancel rejected: {event.client_order_id.value}", context={"reason": str(event.reason)})
 
     def apply_params(self, updates: dict) -> None:
         with self._param_lock:
@@ -352,7 +356,7 @@ Required placement:
 - act after every order submission, cancellation, or forced_stop
 - observe in lifecycle hooks (on_start, on_stop, on_pause, on_resume)
 - act in on_order_filled (log fills)
-- observe in on_order_rejected and on_order_canceled
+- observe in on_order_rejected, on_order_canceled, and on_order_cancel_rejected
 
 ---
 

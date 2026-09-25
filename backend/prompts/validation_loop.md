@@ -66,20 +66,21 @@ All 16 patterns must be present. If the error references one of these, add the m
 | 7 | `on_stop()` | Add `self.observe("Strategy stopped")` |
 | 8 | `on_order_rejected()` | Add `self.observe(f"Order rejected: {event.client_order_id.value}")` |
 | 9 | `on_order_canceled()` | Add `self.observe(f"Order canceled: {event.client_order_id.value}")` |
-| 10 | `set_oms_type()` | Add `self._oms_type = oms_type` |
-| 11 | Rebuild signal in `apply_params()` | Call `self._rebuild_signal_engine()` or equivalent after param update |
-| 12 | Guard `on_order_filled` for unknown `leg_id` | Add `if leg_id is None: return` |
-| 13 | `leg_schema` class attribute | Add matching the strategy's declared legs |
-| 14 | `validate_legs()` classmethod | Add enforcing leg count and side |
-| 15 | `isPaused()` guard | Add `if self.isPaused(): return` at top of every market data handler |
-| 16 | `on_pause()` / `on_resume()` | Add both hooks |
-| 17 | `self.params` in `__init__` | Initialize params in `__init__` |
-| 18 | `self.observe()` in market data handlers | Add logging signal values — e.g. `self.observe("bar", context={"price": float(bar.close)})` |
-| 19 | `self.decide()` before entry/exit | Add before every order decision — e.g. `self.decide("entry signal", context={"reason": "..."})` |
-| 20 | `self.act()` after order actions | Add after every submit/cancel/stop — e.g. `self.act("submitted BUY", context={"qty": qty})` |
-| 21 | Tick throttle guard in `on_quote_tick`/`on_trade_tick`/`on_symbol_quote_tick`/`on_symbol_trade_tick` | Add `if time.monotonic() - self._last_tick_ts < self.params.tick_throttle_interval: return` after `isPaused()` check; add `self._last_tick_ts: float = 0.0` in `__init__`; add `tick_throttle_interval: float = 1.0` to `ConfigParams` |
-| 23 | Every `Price(...)` construction must use `Price.from_str(f"{value:.2f}")` | Replace every `Price(float_value)` with `Price.from_str(f"{float_value:.2f}")` — passing a raw float to `Price()` can produce incorrect precision or a runtime error |
-| 24 | Symmetric market-data teardown | If quotes are subscribed, add matching quote unsubscribe in `on_stop`; if bars are subscribed, add matching bar unsubscribe in `on_stop`; add `on_stop` if missing |
+| 10 | `on_order_cancel_rejected()` | Add `self.observe(f"Cancel rejected: {event.client_order_id.value}", context={"reason": str(event.reason)})` |
+| 11 | `set_oms_type()` | Add `self._oms_type = oms_type` |
+| 12 | Rebuild signal in `apply_params()` | Call `self._rebuild_signal_engine()` or equivalent after param update |
+| 13 | Guard `on_order_filled` for unknown `leg_id` | Add `if leg_id is None: return` |
+| 14 | `leg_schema` class attribute | Add matching the strategy's declared legs |
+| 15 | `validate_legs()` classmethod | Add enforcing leg count and side |
+| 16 | `isPaused()` guard | Add `if self.isPaused(): return` at top of every market data handler |
+| 17 | `on_pause()` / `on_resume()` | Add both hooks |
+| 18 | `self.params` in `__init__` | Initialize params in `__init__` |
+| 19 | `self.observe()` in market data handlers | Add logging signal values — e.g. `self.observe("bar", context={"price": float(bar.close)})` |
+| 20 | `self.decide()` before entry/exit | Add before every order decision — e.g. `self.decide("entry signal", context={"reason": "..."})` |
+| 21 | `self.act()` after order actions | Add after every submit/cancel/stop — e.g. `self.act("submitted BUY", context={"qty": qty})` |
+| 22 | Tick throttle guard in `on_quote_tick`/`on_trade_tick`/`on_symbol_quote_tick`/`on_symbol_trade_tick` | Add `if time.monotonic() - self._last_tick_ts < self.params.tick_throttle_interval: return` after `isPaused()` check; add `self._last_tick_ts: float = 0.0` in `__init__`; add `tick_throttle_interval: float = 1.0` to `ConfigParams` |
+| 24 | Every `Price(...)` construction must use `Price.from_str(f"{value:.2f}")` | Replace every `Price(float_value)` with `Price.from_str(f"{float_value:.2f}")` — passing a raw float to `Price()` can produce incorrect precision or a runtime error |
+| 25 | Symmetric market-data teardown | If quotes are subscribed, add matching quote unsubscribe in `on_stop`; if bars are subscribed, add matching bar unsubscribe in `on_stop`; add `on_stop` if missing |
 
 ---
 

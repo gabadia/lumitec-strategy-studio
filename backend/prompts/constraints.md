@@ -59,7 +59,7 @@ Do not import or instantiate `RLock` in generated strategies. The base strategy 
 
 ---
 
-## Validation Checklist (22 required patterns)
+## Validation Checklist (23 required patterns)
 
 | # | Pattern |
 |---|---|
@@ -73,20 +73,21 @@ Do not import or instantiate `RLock` in generated strategies. The base strategy 
 | 7 | `on_stop()` |
 | 8 | `on_order_rejected()` |
 | 9 | `on_order_canceled()` |
-| 10 | `set_oms_type()` |
-| 11 | Rebuild signal data in `apply_params()` when thresholds change |
-| 12 | Guard `on_order_filled` for unknown `leg_id` |
-| 13 | `leg_schema` class attribute declaring expected legs |
-| 14 | `validate_legs()` classmethod enforcing leg count and side |
-| 15 | `isPaused()` guard at top of every market data handler |
-| 16 | `on_pause()` / `on_resume()` hooks |
-| 17 | `self.params` initialised in `__init__` |
-| 18 | `self.observe()` calls in every market data handler logging signal values |
-| 19 | `self.decide()` calls before every entry and exit decision |
-| 20 | `self.act()` calls after every order submission, cancellation, and forced_stop |
-| 22 | All arithmetic using `tick.ask_price`, `tick.bid_price`, `tick.price`, `bar.close`, `bar.open`, `bar.high`, `bar.low` MUST cast to `float` first — these are `decimal.Decimal` in Nautilus. Use `float(tick.ask_price)`. Never mix `Decimal` with `float` in `-`, `+`, `*`, `/` expressions. |
-| 21 | Tick throttle guard in `on_quote_tick`/`on_trade_tick`/`on_symbol_quote_tick`/`on_symbol_trade_tick` — `if time.monotonic() - self._last_tick_ts < self.params.tick_throttle_interval: return`; add `self._last_tick_ts: float = 0.0` in `__init__`; add `tick_throttle_interval: float = 1.0` to `ConfigParams` |
-| 23 | Every `Price(...)` construction MUST use `Price.from_str(f"{price_float:.2f}")` — NEVER `Price(float_value)`. Passing a raw `float` to `Price()` can produce incorrect precision or a runtime error. Always format the float to the required decimal places first: `Price.from_str(f"{buy_price:.2f}")`. |
+| 10 | `on_order_cancel_rejected()` |
+| 11 | `set_oms_type()` |
+| 12 | Rebuild signal data in `apply_params()` when thresholds change |
+| 13 | Guard `on_order_filled` for unknown `leg_id` |
+| 14 | `leg_schema` class attribute declaring expected legs |
+| 15 | `validate_legs()` classmethod enforcing leg count and side |
+| 16 | `isPaused()` guard at top of every market data handler |
+| 17 | `on_pause()` / `on_resume()` hooks |
+| 18 | `self.params` initialised in `__init__` |
+| 19 | `self.observe()` calls in every market data handler logging signal values |
+| 20 | `self.decide()` calls before every entry and exit decision |
+| 21 | `self.act()` calls after every order submission, cancellation, and forced_stop |
+| 23 | All arithmetic using `tick.ask_price`, `tick.bid_price`, `tick.price`, `bar.close`, `bar.open`, `bar.high`, `bar.low` MUST cast to `float` first — these are `decimal.Decimal` in Nautilus. Use `float(tick.ask_price)`. Never mix `Decimal` with `float` in `-`, `+`, `*`, `/` expressions. |
+| 22 | Tick throttle guard in `on_quote_tick`/`on_trade_tick`/`on_symbol_quote_tick`/`on_symbol_trade_tick` — `if time.monotonic() - self._last_tick_ts < self.params.tick_throttle_interval: return`; add `self._last_tick_ts: float = 0.0` in `__init__`; add `tick_throttle_interval: float = 1.0` to `ConfigParams` |
+| 24 | Every `Price(...)` construction MUST use `Price.from_str(f"{price_float:.2f}")` — NEVER `Price(float_value)`. Passing a raw `float` to `Price()` can produce incorrect precision or a runtime error. Always format the float to the required decimal places first: `Price.from_str(f"{buy_price:.2f}")`. |
 
 > **Authoritative fix guide with minimal-fix examples**: see [`validation_loop.md`](validation_loop.md).
 
