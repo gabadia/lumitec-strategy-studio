@@ -546,7 +546,7 @@ async def _stream_with_query_tool(
         for _round in range(20):  # safety cap on tool-call rounds
             resp = await _anthropic.messages.create(
                 model=model,
-                max_tokens=4096,
+                max_tokens=8192,
                 system=system,
                 messages=messages,
                 tools=[tool_def],
@@ -590,7 +590,19 @@ async def _stream_with_query_tool(
                 })
             messages.append({"role": "user", "content": tool_results})
         else:
-            yield "\n\n*[Query budget exhausted — analysis may be incomplete.]*"
+            messages.append({
+                "role": "user",
+                "content": "You've reached the query limit. Based on everything you've learned so far, write your final analysis now — do not call any more tools.",
+            })
+            final_resp = await _anthropic.messages.create(
+                model=model,
+                max_tokens=8192,
+                system=system,
+                messages=messages,
+            )
+            for block in final_resp.content:
+                if block.type == "text":
+                    yield block.text
 
     else:  # OpenAI
         if not _openai:
@@ -613,7 +625,7 @@ async def _stream_with_query_tool(
         for _round in range(20):
             resp_oa = await _openai.chat.completions.create(
                 model=model,
-                max_tokens=4096,
+                max_tokens=8192,
                 messages=messages_oa,
                 tools=[tool_def_oa],
                 tool_choice="auto",
@@ -652,7 +664,19 @@ async def _stream_with_query_tool(
                     "content": json.dumps(rows),
                 })
         else:
-            yield "\n\n*[Query budget exhausted — analysis may be incomplete.]*"
+            messages_oa.append({
+                "role": "user",
+                "content": "You've reached the query limit. Based on everything you've learned so far, write your final analysis now — do not call any more tools.",
+            })
+            final_resp_oa = await _openai.chat.completions.create(
+                model=model,
+                max_tokens=8192,
+                messages=messages_oa,
+                temperature=0.1,
+            )
+            final_msg = final_resp_oa.choices[0].message
+            if final_msg.content:
+                yield final_msg.content
 
 
 # ---------------------------------------------------------------------------
