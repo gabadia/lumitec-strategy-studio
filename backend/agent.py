@@ -420,6 +420,62 @@ def _generation_scaffold_issues(code: str) -> list[str]:
     return issues
 
 
+_GENERATION_RISK_FIELD_DEFAULTS = {
+    "max_position": "int = 100",
+    "max_loss": "float = 1000.0",
+    "max_active_orders_per_side": "int = 1",
+    "max_order_rate_per_second": "float = 1.0",
+}
+
+_STUDIO_VERSION_LINE = "Strategy created using Lumitec's Strategy Studio version X.\n"
+
+
+def _insert_after_class_header(code: str, header_re: str, field_lines: str) -> str:
+    """Insert `field_lines` as the first statements in the class matching `header_re`."""
+    m = re.search(header_re, code, re.MULTILINE)
+    if not m:
+        return code
+    line_end = code.index("\n", m.end()) + 1
+    return code[:line_end] + field_lines + code[line_end:]
+
+
+def _patch_generation_scaffold(code: str, issues: list[str]) -> str:
+    """Deterministically fix the mechanical scaffold gaps an LLM repair pass failed to add:
+    the version-header line and the fixed set of required risk fields. Does not attempt to
+    fix structural issues (missing/misordered classes, missing methods) — those still need
+    an LLM rewrite."""
+    if any("missing module header" in i for i in issues) and \
+            "Strategy created using Lumitec's Strategy Studio version" not in code:
+        stripped = code.lstrip()
+        lead = len(code) - len(stripped)
+        inserted = False
+        for quote in ('"""', "'''"):
+            if stripped.startswith(quote):
+                at = lead + len(quote)
+                code = code[:at] + "\n" + _STUDIO_VERSION_LINE + code[at:]
+                inserted = True
+                break
+        if not inserted:
+            code = f'"""\n{_STUDIO_VERSION_LINE}"""\n\n' + code
+
+    missing_fields = [
+        f for f in _GENERATION_RISK_FIELDS
+        if f"missing required risk field {f}" in issues
+    ]
+    if missing_fields:
+        field_lines = "".join(
+            f"    {f}: {_GENERATION_RISK_FIELD_DEFAULTS[f]}\n" for f in missing_fields
+        )
+        code = _insert_after_class_header(
+            code, r'^class\s+Config\(LumitecStrategyConfig\):', field_lines
+        )
+        code = _insert_after_class_header(
+            code, r'^@dataclass\(frozen=True\)\s*\nclass\s+ConfigParams:', field_lines
+        )
+
+    return code
+
+
 def _extract_metadata(code: str, intent: str = "") -> dict:
     """Extract class name, objective, symbol, legs, and safety constraints."""
     # Class name
@@ -1458,6 +1514,9 @@ async def run_strategy_workflow(
 
             if repaired_code:
                 repaired_issues = _generation_scaffold_issues(repaired_code)
+                if repaired_issues:
+                    repaired_code = _patch_generation_scaffold(repaired_code, repaired_issues)
+                    repaired_issues = _generation_scaffold_issues(repaired_code)
                 if repaired_issues:
                     yield {
                         "type": "error",
